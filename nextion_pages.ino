@@ -124,16 +124,15 @@ void updateModuleInfoPage() {
 void updateSASInfoPage() {
   extern SasInfo sasInfo;
 
-  // t_soft: Part Number (doc duoc hoac fallback "8600A732")
   String pn = (sasInfo.valid && strlen(sasInfo.partNumber87) > 0)
               ? String(sasInfo.partNumber87)
               : "8600A732";
 
-  nxSendCmd("i4 (sas).t_vin.txt=\"N/A\"");
-  nxSendCmd(String("i4 (sas).t_soft.txt=\"") + pn + "\"");
-  nxSendCmd("i4 (sas).t_hard.txt=\"N/A\"");
-  nxSendCmd("i4 (sas).t_cal.txt=\"N/A\"");
-  nxSendCmd("i4 (sas).t_pro.txt=\"KWP2000 + ISO-TP\"");
+  nxSendCmd("t_vin.txt=\"N/A\"");
+  nxSendCmd(String("t_soft.txt=\"") + pn + "\"");
+  nxSendCmd("t_hard.txt=\"N/A\"");
+  nxSendCmd("t_cal.txt=\"N/A\"");
+  nxSendCmd("t_pro.txt=\"KWP2000 + ISO-TP\"");
 }
 
 void updateAboutPage() {

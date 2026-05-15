@@ -39,7 +39,7 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
   // Safety: RPM > 600
   if (getActuatorRpm() < 600) {
     Serial.println("[ACT] RPM < 600, can no may truoc");
-    nxSendCmd("act test.t_warn.txt=\"RPM too low!\"");
+    nxSendCmd("t_warn.txt=\"RPM too low!\"");
     resetInjectorButton(injNum);
     return false;
   }
