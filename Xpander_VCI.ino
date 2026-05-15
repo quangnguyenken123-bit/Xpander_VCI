@@ -43,6 +43,7 @@ extern void taskNextionRX(void* pvParameters);
 extern void taskNextionTX(void* pvParameters);
 extern bool eps_read_steering_angle();
 extern void taskSteering(void* pvParameters);
+extern void taskActuator(void* pvParameters);
 
 // ============================================================
 // TASK 1: QUÉT PID LIÊN TỤCg*
@@ -234,6 +235,7 @@ void setup() {
   xTaskCreate(taskReadCAN,    "CAN",   STACK_CAN_TASK,    NULL, PRIORITY_CAN_TASK,    &hTaskCAN);
   xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, NULL);
   xTaskCreate(taskSteering, "STEER", 4096, NULL, 1, NULL);
+  xTaskCreate(taskActuator, "ACT", 4096, NULL, 1, NULL);
   xTaskCreate(taskNextionRX, "NX_RX", 4096, NULL, 2, NULL);
   xTaskCreate(taskNextionTX, "NX_TX", 8192, NULL, 1, NULL);
   xTaskCreate(taskPrintSerial,"PRINT", STACK_NEXTION_TASK, NULL, PRIORITY_NEXTION_TASK, &hTaskPrint);

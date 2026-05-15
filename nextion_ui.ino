@@ -21,6 +21,8 @@ volatile bool flagReadDTC       = false;
 volatile bool flagClearDTC      = false;
 volatile bool flagResetConn     = false;
 volatile bool flagScrollChanged = false;
+extern volatile uint8_t flagInjectorTest;
+extern volatile bool actuatorRunning;
 
 // ============================================================
 // GỬI COMMAND ĐẾN NEXTION (tự thêm 3 byte 0xFF kết thúc)
@@ -118,6 +120,21 @@ void nxProcessMessage() {
     flagClearDTC = true;
     currentPage = 12;
     Serial.println("[NX] Yeu cau: Clear DTC");
+  }
+  else if (msg.startsWith("inj") && msg.indexOf(":on") > 0) {
+    uint8_t n = msg.substring(3, msg.indexOf(":")).toInt();
+    if (n >= 1 && n <= 4) {
+      if (!actuatorRunning) {
+        flagInjectorTest = n;
+        Serial.printf("[NX] Yeu cau test Injector %d\n", n);
+      } else {
+        Serial.println("[NX] Dang test, bo qua");
+      }
+    }
+  }
+  else if (msg.startsWith("inj") && msg.indexOf(":off") > 0) {
+    // User tat button thu cong (bo qua, ECM tu ket thuc)
+    Serial.println("[NX] Injector off (ignore, ECM auto)");
   }
   // === "reset_conn" ===
   else if (msg.indexOf("reset_conn") >= 0) {
