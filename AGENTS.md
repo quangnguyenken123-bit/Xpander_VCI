@@ -71,16 +71,24 @@ sprintf(buf, "%c%d%03X", letter, (raw >> 12) & 3, raw & 0x0FFF);
 | 0 | page0 | Home menu |
 | 1 | sas | SAS menu |
 | 2 | ecm | ECM menu |
+| 3 | setting | Brightness + Dark mode (Nextion tự xử lý) |
 | 4 | diag | Diagnostic menu |
 | 5 | i4 | Module Information |
+| 6 | act test | Actuator Test 4 injectors |
+| 7 | i4 (sas) | SAS Module Information |
+| 8 | diag (saas) | SAS Diagnostic menu |
 | 9 | monitor(sas) | Steering angle gauge |
+| 10 | about | About page (uptime + QR) |
 | 11 | live data | Live data (30 PIDs, slider h0) |
 | 12 | dtc | DTC read/clear |
+| 13 | dtc search | DTC search (deferred) |
+| 14 | dtc (sas) | SAS DTC |
 
 ## Nextion Navigation Protocol
 - Pages gửi `p:XX\n` về ESP32 khi load (PostInitialize Event)
 - Slider gửi `scroll:` + 4 bytes little-endian
 - DTC buttons gửi `read_dtc\n` / `clear_dtc\n`
+- Page 12 (dtc) và 14 (dtc sas) đều gửi `read_dtc` / `clear_dtc` → ESP32 phân biệt bằng `currentPage`
 
 ## Known Issues / Limitations
 - SAS LID 0x9C trả NRC 0x12 → chỉ dùng LID 0x87

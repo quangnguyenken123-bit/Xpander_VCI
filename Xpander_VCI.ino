@@ -44,6 +44,9 @@ extern void taskNextionTX(void* pvParameters);
 extern bool eps_read_steering_angle();
 extern void taskSteering(void* pvParameters);
 extern void taskActuator(void* pvParameters);
+extern bool sas_read_module_info();
+extern void updateSASInfoPage();
+extern void updateAboutPage();
 
 // ============================================================
 // TASK 1: QUÉT PID LIÊN TỤCg*
@@ -227,6 +230,7 @@ void setup() {
 
   // Đọc VIN ngay khi khởi động
   readVIN();
+  sas_read_module_info();
   setupNextion();
   // Đọc DTC khi mới bật máy
   // DTC sẽ được đọc trong taskPrintSerial sau khi có data

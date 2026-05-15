@@ -72,7 +72,8 @@ void taskSteering(void* pvParameters) {
 // payload[20..21] = padding (spaces)
 // ============================================================
 bool sas_read_module_info() {
-  vTaskSuspend(hTaskCAN);
+  bool canTaskActive = (hTaskCAN != NULL);
+  if (canTaskActive) vTaskSuspend(hTaskCAN);
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t buf[32];
@@ -101,6 +102,6 @@ bool sas_read_module_info() {
   }
 
   sasInfo.valid = ok;
-  vTaskResume(hTaskCAN);
+  if (canTaskActive) vTaskResume(hTaskCAN);
   return ok;
 }

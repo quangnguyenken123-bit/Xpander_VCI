@@ -112,13 +112,13 @@ void nxProcessMessage() {
   // === "read_dtc" ===
   else if (msg.indexOf("read_dtc") >= 0) {
     flagReadDTC = true;
-    currentPage = 12;
+    if (currentPage != 14) currentPage = 12;
     Serial.println("[NX] Yeu cau: Read DTC");
   }
   // === "clear_dtc" ===
   else if (msg.indexOf("clear_dtc") >= 0) {
     flagClearDTC = true;
-    currentPage = 12;
+    if (currentPage != 14) currentPage = 12;
     Serial.println("[NX] Yeu cau: Clear DTC");
   }
   else if (msg.startsWith("inj") && msg.indexOf(":on") > 0) {

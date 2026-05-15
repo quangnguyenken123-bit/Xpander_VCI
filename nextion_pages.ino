@@ -24,6 +24,8 @@ extern void clearDTC();
 extern void setupCAN();
 extern String readECMDTC();
 extern bool   clearECMDTC();
+extern String readSASDTC();
+extern bool   clearSASDTC();
 // ============================================================
 // DANH SÁCH 30 PID HIỂN THỊ TRÊN LIVE DATA
 // ============================================================
@@ -119,12 +121,46 @@ void updateModuleInfoPage() {
   nxSendCmd(String("i4.t_pro.txt=\"")  + FALLBACK_PROTO + "\"");
 }
 
+void updateSASInfoPage() {
+  extern SasInfo sasInfo;
+
+  // t_soft: Part Number (doc duoc hoac fallback "8600A732")
+  String pn = (sasInfo.valid && strlen(sasInfo.partNumber87) > 0)
+              ? String(sasInfo.partNumber87)
+              : "8600A732";
+
+  nxSendCmd("i4 (sas).t_vin.txt=\"N/A\"");
+  nxSendCmd(String("i4 (sas).t_soft.txt=\"") + pn + "\"");
+  nxSendCmd("i4 (sas).t_hard.txt=\"N/A\"");
+  nxSendCmd("i4 (sas).t_cal.txt=\"N/A\"");
+  nxSendCmd("i4 (sas).t_pro.txt=\"KWP2000 + ISO-TP\"");
+}
+
+void updateAboutPage() {
+  uint32_t totalSecs = millis() / 1000;
+  uint32_t mins = totalSecs / 60;
+  uint32_t secs = totalSecs % 60;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%02u:%02u",
+           (unsigned)mins, (unsigned)secs);
+  nxSendCmd(String("about.t0.txt=\"") + buf + "\"");
+}
+
 // ============================================================
 // XỬ LÝ "read_dtc" từ Nextion
 // ============================================================
 void handleReadDTC() {
-  Serial.println("[NX] Doc DTC...");
-  nxSendCmd("t0.txt=\"Reading DTC...\"");
+  if (currentPage == 14) {
+    Serial.println("[NX] Doc SAS DTC...");
+    nxSendCmd("t0.txt=\"Reading SAS DTC...\"");
+    String result = readSASDTC();
+    nxSendCmd(String("t0.txt=\"") + result + "\"");
+    Serial.printf("[NX] DTC Result: %s\n", result.c_str());
+    return;
+  }
+
+  Serial.println("[NX] Doc ECM DTC...");
+  nxSendCmd("t0.txt=\"Reading ECM DTC...\"");
 
   String result = readECMDTC();   // 1 lần, SID 0x18 trả tất cả
   nxSendCmd(String("t0.txt=\"") + result + "\"");
@@ -132,8 +168,16 @@ void handleReadDTC() {
 }
 
 void handleClearDTC() {
-  Serial.println("[NX] Xoa DTC...");
-  nxSendCmd("t0.txt=\"Clearing...\"");
+  if (currentPage == 14) {
+    Serial.println("[NX] Xoa SAS DTC...");
+    nxSendCmd("t0.txt=\"Clearing SAS...\"");
+    bool ok = clearSASDTC();
+    nxSendCmd(ok ? "t0.txt=\"DTC Cleared!\"" : "t0.txt=\"Clear Failed\"");
+    return;
+  }
+
+  Serial.println("[NX] Xoa ECM DTC...");
+  nxSendCmd("t0.txt=\"Clearing ECM...\"");
   bool ok = clearECMDTC();
   nxSendCmd(ok ? "t0.txt=\"DTC Cleared!\"" : "t0.txt=\"Clear Failed\"");
 }
@@ -163,6 +207,8 @@ void taskNextionTX(void* pvParameters) {
     if (currentPage != lastPushedPage) {
       switch (currentPage) {
         case 5:  updateModuleInfoPage(); break;
+        case 7:  updateSASInfoPage();    break;
+        case 10: updateAboutPage();      break;
         case 11: updateLiveDataPage();   break;
         default: break;
       }
@@ -170,6 +216,7 @@ void taskNextionTX(void* pvParameters) {
     }
 
     if (currentPage == 11) updateLiveDataPage();
+    if (currentPage == 10) updateAboutPage();
     vTaskDelay(pdMS_TO_TICKS(800));
   }
 }
