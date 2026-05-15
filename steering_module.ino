@@ -6,6 +6,7 @@
 #include "vehicle_data.h"
 
 extern volatile int currentPage;
+extern void updateSteeringPage();
 extern bool kwp_read_data_by_lid(uint16_t tx_id, uint16_t rx_id,
                                   uint8_t lid, uint8_t* buf, uint16_t* len);
 extern TaskHandle_t hTaskCAN;
@@ -53,8 +54,9 @@ void taskSteering(void* pvParameters) {
     if (currentPage == 9) {
       vTaskSuspend(hTaskCAN);
       vTaskDelay(pdMS_TO_TICKS(10));
-      eps_read_steering_angle();
+      bool ok = eps_read_steering_angle();
       vTaskResume(hTaskCAN);
+      if (ok) updateSteeringPage();
       vTaskDelay(pdMS_TO_TICKS(100));   // 10 Hz
     } else {
       steering.valid = false;

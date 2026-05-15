@@ -155,26 +155,22 @@ void taskNextionTX(void* pvParameters) {
   updateModuleInfoPage();
 
   int lastPushedPage = -1;
-
   for (;;) {
     if (flagReadDTC)       { flagReadDTC = false;       handleReadDTC(); }
     if (flagClearDTC)      { flagClearDTC = false;      handleClearDTC(); }
     if (flagResetConn)     { flagResetConn = false;     handleResetConn(); }
-    if (flagScrollChanged) { flagScrollChanged = false; }
-    // Push NGAY khi page vừa thay đổi (nhờ Initialize Event báo về)
+    if (flagScrollChanged) { flagScrollChanged = false; updateLiveDataPage(); }
     if (currentPage != lastPushedPage) {
       switch (currentPage) {
         case 5:  updateModuleInfoPage(); break;
+        case 11: updateLiveDataPage();   break;
         default: break;
       }
       lastPushedPage = currentPage;
     }
 
-    // Tiếp tục refresh live data liên tục
     if (currentPage == 11) updateLiveDataPage();
-    if (currentPage == 9)  updateSteeringPage();
-
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    vTaskDelay(pdMS_TO_TICKS(800));
   }
 }
 //
