@@ -5,6 +5,7 @@
 #include "config.h"
 #include "vehicle_data.h"
 
+extern volatile int currentPage;
 extern bool kwp_read_data_by_lid(uint16_t tx_id, uint16_t rx_id,
                                   uint8_t lid, uint8_t* buf, uint16_t* len);
 extern TaskHandle_t hTaskCAN;

@@ -1,0 +1,1471 @@
+// ============================================
+// File: [tên file].ino
+// Mô tả: [chức năng]
+// ============================================// ============================================================
+// File: can_handler.ino
+// Mô tả: Khởi tạo MCP2515, gửi/nhận CAN frame
+// ============================================================
+#include <mcp_can.h>
+#include <SPI.h>
+#include "config.h"
+#include "vehicle_data.h"
+
+MCP_CAN CAN(CAN_CS_PIN);
+
+// ============================================================
+// KHỞI TẠO CAN BUS
+// ============================================================
+void setupCAN() {
+  Serial.println("[CAN] Dang khoi tao MCP2515...");
+
+  uint8_t retry = 0;
+  while (CAN.begin(MCP_STDEXT, CAN_BAUDRATE, CAN_OSC_FREQ) != CAN_OK) {
+    retry++;
+    Serial.printf("[CAN] Init that bai! Lan thu %d/5\n", retry);
+    if (retry >= 5) {
+      Serial.println("[CAN] LỖII NGHIÊM TRỌNG: Không thể khởi tạo MCP2515!");
+      Serial.println("[CAN] Kiểm tra: dây SPI, CS pin, nguồn 3.3V, thạch anh 8MHz");
+      while (1) vTaskDelay(pdMS_TO_TICKS(1000)); // Dừng hệ thống
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  // --- CÀI FILTER: Chỉ nhận 7E8 (ECM) và 7E9 (TCM) ---
+  CAN.init_Mask(0, 0, 0x07FF0000);
+  CAN.init_Mask(1, 0, 0x07FF0000);
+  CAN.init_Filt(0, 0, 0x07E80000); // ECM response
+  CAN.init_Filt(1, 0, 0x07E90000); // TCM response
+  CAN.init_Filt(2, 0, 0x04840000);
+  CAN.init_Filt(3, 0, 0x07E80000);
+  CAN.init_Filt(4, 0, 0x07E80000);
+  CAN.init_Filt(5, 0, 0x07E80000);
+
+  CAN.setMode(MCP_NORMAL);
+  pinMode(CAN_INT_PIN, INPUT);
+
+  Serial.println("[CAN] Khoi tao OK! Filter: 0x7E8 + 0x7E9");
+}
+
+// ============================================================
+// GỬI REQUEST
+// ============================================================
+
+// Mode 01 - OBD2 chuẩn
+bool canSendMode01(uint8_t pid) {
+  unsigned char data[8] = {0x02, 0x01, pid, 0, 0, 0, 0, 0};
+  return CAN.sendMsgBuf(CAN_ID_BROADCAST, 0, 8, data) == CAN_OK;
+}
+
+// Mode 21 - Mitsubishi specific
+bool canSendMode21(uint8_t lid) {
+  unsigned char data[8] = {0x02, 0x21, lid, 0, 0, 0, 0, 0};
+  return CAN.sendMsgBuf(CAN_ID_ECM_REQ, 0, 8, data) == CAN_OK;
+}
+
+// Mode 09 - Vehicle info (VIN, calibration)
+bool canSendMode09(uint8_t pid) {
+  unsigned char data[8] = {0x02, 0x09, pid, 0, 0, 0, 0, 0};
+  return CAN.sendMsgBuf(CAN_ID_ECM_REQ, 0, 8, data) == CAN_OK;
+}
+
+// Gửi frame tùy ý (dùng cho DTC, UDS)
+bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len) {
+  return CAN.sendMsgBuf(id, 0, len, buf) == CAN_OK;
+}
+
+// ============================================================
+// NHẬN FRAME CÓ TIMEOUT
+// Trả về true nếu nhận được frame hợp lệ từ ECM/TCM
+// ============================================================
+bool canReceive(long unsigned int* rxId, unsigned char* len,
+                unsigned char* rxBuf, uint32_t timeoutMs) {
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (!digitalRead(CAN_INT_PIN)) {
+      CAN.readMsgBuf(rxId, len, rxBuf);
+      // Chỉ chấp nhận phản hồi từ ECM hoặc TCM
+      if (*rxId == CAN_ID_ECM_RESP || *rxId == CAN_ID_TCM_RESP) {
+        return true;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1)); // Nhường CPU 1ms mỗi vòng
+  }
+  return false; // Timeout
+}
+
+// ============================================================
+// XẢ BUFFER CAN (Dùng trước khi gửi lệnh quan trọng)
+// ============================================================
+void canFlushBuffer() {
+  long unsigned int id;
+  unsigned char len = 0, buf[8];
+  uint8_t count = 0;
+  while (!digitalRead(CAN_INT_PIN) && count < 10) {
+    CAN.readMsgBuf(&id, &len, buf);
+    count++;
+  }
+}// ============================================================
+// File: dtc_handler.ino
+// Mô tả: Read/Clear DTC cho ECM + SAS
+//        Dùng SID 0x18 (KWP) qua ISO-TP
+// ============================================================
+#include "config.h"
+#include "vehicle_data.h"
+
+extern bool isotp_request(uint16_t tx_id, uint16_t rx_id,
+                           const uint8_t* req, uint8_t reqLen,
+                           uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs);
+extern TaskHandle_t hTaskCAN;
+
+// ============================================================
+// DECODE 2 BYTE → CHUỖI MÃ LỖI (P0010, C0123, ...)
+// ============================================================
+String decodeDTC(uint8_t hi, uint8_t lo) {
+  if (hi == 0 && lo == 0) return "";
+  uint16_t raw = ((uint16_t)hi << 8) | lo;
+  char letter = "PCBU"[raw >> 14];
+  char buf[8];
+  sprintf(buf, "%c%d%03X", letter, (raw >> 12) & 3, raw & 0x0FFF);
+  return String(buf);
+}
+
+// ============================================================
+// PARSE PAYLOAD SID 0x18 RESPONSE
+// payload[0]=0x58, payload[1]=count, sau đó DTC triplets
+// ============================================================
+String parseDTCPayload(uint8_t* resp, uint16_t len) {
+  if (len < 2)            return "Timeout";
+  if (resp[0] != 0x58)    return "Bad Response";
+  uint8_t count = resp[1];
+  if (count == 0)          return "No Error";
+
+  String result = "";
+  for (int i = 0; i < count; i++) {
+    uint8_t idx = 2 + i * 3;
+    if (idx + 1 >= len) break;
+    String dtc = decodeDTC(resp[idx], resp[idx + 1]);
+    if (dtc != "") {
+      if (result != "") result += ", ";
+      result += dtc;
+    }
+  }
+  return (result == "") ? "No Error" : result;
+}
+
+// ============================================================
+// ECM READ DTC — SID 0x18 (KWP)
+// Request:  04 18 00 FF 00 00 00 00
+// ============================================================
+String readECMDTC() {
+  vTaskSuspend(hTaskCAN);
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  uint8_t req[4]  = {0x18, 0x00, 0xFF, 0x00};
+  uint8_t resp[64];
+  uint16_t respLen;
+  String result = "Timeout";
+
+  if (isotp_request(CAN_ID_ECM_REQ, CAN_ID_ECM_RESP,
+                    req, 4, resp, &respLen, ISOTP_TIMEOUT_MS)) {
+    result = parseDTCPayload(resp, respLen);
+  }
+
+  Serial.printf("[DTC ECM] %s\n", result.c_str());
+  vTaskResume(hTaskCAN);
+  return result;
+}
+
+// ============================================================
+// ECM CLEAR DTC — SID 0x14
+// Request:  03 14 FF 00 00 00 00 00
+// Response: resp[0] == 0x54 → success
+// ============================================================
+bool clearECMDTC() {
+  vTaskSuspend(hTaskCAN);
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  uint8_t req[3]  = {0x14, 0xFF, 0x00};
+  uint8_t resp[16];
+  uint16_t respLen;
+  bool success = false;
+
+  if (isotp_request(CAN_ID_ECM_REQ, CAN_ID_ECM_RESP,
+                    req, 3, resp, &respLen, ISOTP_TIMEOUT_MS)) {
+    success = (respLen >= 1 && resp[0] == 0x54);
+  }
+
+  Serial.printf("[DTC ECM] Clear %s\n", success ? "OK" : "FAIL");
+  vTaskResume(hTaskCAN);
+  return success;
+}
+
+// ============================================================
+// SAS READ DTC — SID 0x18 (KWP), ID 0x622/0x484
+// ============================================================
+String readSASDTC() {
+  vTaskSuspend(hTaskCAN);
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  uint8_t req[4]  = {0x18, 0x00, 0xFF, 0x00};
+  uint8_t resp[64];
+  uint16_t respLen;
+  String result = "Timeout";
+
+  if (isotp_request(SAS_REQ_ID, SAS_RESP_ID,
+                    req, 4, resp, &respLen, ISOTP_TIMEOUT_MS)) {
+    result = parseDTCPayload(resp, respLen);
+  }
+
+  Serial.printf("[DTC SAS] %s\n", result.c_str());
+  vTaskResume(hTaskCAN);
+  return result;
+}
+
+// ============================================================
+// SAS CLEAR DTC — SID 0x14
+// ============================================================
+bool clearSASDTC() {
+  vTaskSuspend(hTaskCAN);
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  uint8_t req[3]  = {0x14, 0xFF, 0x00};
+  uint8_t resp[16];
+  uint16_t respLen;
+  bool success = false;
+
+  if (isotp_request(SAS_REQ_ID, SAS_RESP_ID,
+                    req, 3, resp, &respLen, ISOTP_TIMEOUT_MS)) {
+    success = (respLen >= 1 && resp[0] == 0x54);
+  }
+
+  Serial.printf("[DTC SAS] Clear %s\n", success ? "OK" : "FAIL");
+  vTaskResume(hTaskCAN);
+  return success;
+}
+
+// ============================================================
+// LEGACY WRAPPERS (nextion_pages.ino gọi)
+// ============================================================
+String readDTC(uint8_t mode) { return readECMDTC(); }
+void   clearDTC()             { clearECMDTC(); }
+void   printDTC() {
+  Serial.println("\n======= MÃ LỖI ECM =======");
+  Serial.println(readECMDTC());
+  Serial.println("===========================");
+}// ============================================================
+// File: isotp.ino
+// Mô tả: ISO-TP transport layer (ISO 15765-2)
+//        Handle FF/CF/FC + NRC 0x78 retry
+// ============================================================
+#include "config.h"
+
+extern bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len);
+
+// Gửi Flow Control sau khi nhận First Frame
+static void isotp_send_fc(uint16_t tx_id) {
+  unsigned char fc[8] = {
+    0x30, ISOTP_FLOW_CONTROL_BS, ISOTP_FLOW_CONTROL_ST,
+    0, 0, 0, 0, 0
+  };
+  canSendRaw(tx_id, fc, 8);
+}
+
+// Gửi Single Frame (payload ≤ 7 bytes)
+bool isotp_send(uint16_t tx_id, const uint8_t* data, uint8_t len) {
+  if (len > 7) return false;
+  unsigned char buf[8] = {0};
+  buf[0] = len & 0x0F;
+  memcpy(&buf[1], data, len);
+  return canSendRaw(tx_id, buf, 8);
+}
+
+// Nhận ISO-TP message (tự xử lý FF/CF reassembly, NRC 0x78)
+bool isotp_receive(uint16_t tx_id, uint16_t rx_id,
+                   uint8_t* buf, uint16_t* outLen, uint32_t timeoutMs) {
+  unsigned long start = millis();
+  uint16_t totalLen = 0, received = 0;
+  uint8_t  expectSeq = 1, pendingCount = 0;
+  bool     gotFF = false;
+  *outLen = 0;
+
+  while (millis() - start < timeoutMs) {
+    if (!digitalRead(CAN_INT_PIN)) {
+      long unsigned int rxId;
+      unsigned char len = 0, rxBuf[8];
+      CAN.readMsgBuf(&rxId, &len, rxBuf);
+      if (rxId != rx_id) continue;
+
+      uint8_t pci = rxBuf[0] & 0xF0;
+
+      // Single Frame (bao gồm NRC)
+      if (pci == 0x00) {
+        uint8_t sfLen = rxBuf[0] & 0x0F;
+        if (sfLen >= 3 && rxBuf[1] == 0x7F && rxBuf[3] == 0x78) {
+          pendingCount++;
+          Serial.printf("[ISOTP] NRC 0x78 pending %d/%d\n",
+                        pendingCount, ISOTP_MAX_PENDING_RETRY);
+          if (pendingCount >= ISOTP_MAX_PENDING_RETRY) return false;
+          start = millis();
+          continue;
+        }
+        if (sfLen >= 3 && rxBuf[1] == 0x7F) {
+          Serial.printf("[ISOTP] NRC SID=%02X code=%02X\n", rxBuf[2], rxBuf[3]);
+          return false;
+        }
+        memcpy(buf, &rxBuf[1], sfLen);
+        *outLen = sfLen;
+        return true;
+      }
+
+      // First Frame
+      else if (pci == 0x10) {
+        totalLen = ((rxBuf[0] & 0x0F) << 8) | rxBuf[1];
+        if (totalLen == 0 || totalLen > 256) return false;
+        uint8_t copy = (totalLen < 6) ? totalLen : 6;
+        memcpy(buf, &rxBuf[2], copy);
+        received = copy;
+        expectSeq = 1;
+        gotFF = true;
+        isotp_send_fc(tx_id);
+        Serial.printf("[ISOTP] FF: total=%d bytes, sent FC\n", totalLen);
+      }
+
+      // Consecutive Frame
+      else if (pci == 0x20 && gotFF) {
+        uint8_t seq = rxBuf[0] & 0x0F;
+        if (seq != (expectSeq & 0x0F)) {
+          Serial.printf("[ISOTP] CF seq error: %d != %d\n", seq, expectSeq & 0x0F);
+          return false;
+        }
+        uint16_t remaining = totalLen - received;
+        uint8_t  toCopy    = (remaining > 7) ? 7 : (uint8_t)remaining;
+        memcpy(&buf[received], &rxBuf[1], toCopy);
+        received += toCopy;
+        expectSeq++;
+        if (received >= totalLen) {
+          *outLen = totalLen;
+          return true;
+        }
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  Serial.println("[ISOTP] RX Timeout");
+  return false;
+}
+
+// Request + Response trong 1 lần gọi
+bool isotp_request(uint16_t tx_id, uint16_t rx_id,
+                   const uint8_t* req, uint8_t reqLen,
+                   uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs) {
+  if (!isotp_send(tx_id, req, reqLen)) return false;
+  return isotp_receive(tx_id, rx_id, resp, respLen, timeoutMs);
+}// ============================================================
+// File: kwp2000.ino
+// Mô tả: KWP2000 service commands (SID 0x1A, 0x21, 0x3E)
+// ============================================================
+#include "config.h"
+
+extern bool isotp_request(uint16_t tx_id, uint16_t rx_id,
+                          const uint8_t* req, uint8_t reqLen,
+                          uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs);
+extern bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len);
+
+// SID 0x1A — ReadECUIdentification (dùng cho SAS module info sau này)
+bool kwp_read_ecu_id(uint16_t tx_id, uint16_t rx_id,
+                     uint8_t lid, uint8_t* buf, uint16_t* len) {
+  uint8_t req[2] = {0x1A, lid};
+  return isotp_request(tx_id, rx_id, req, 2, buf, len, ISOTP_TIMEOUT_MS);
+}
+
+// SID 0x21 — ReadDataByLocalIdentifier (dùng cho EPS steering)
+bool kwp_read_data_by_lid(uint16_t tx_id, uint16_t rx_id,
+                          uint8_t lid, uint8_t* buf, uint16_t* len) {
+  uint8_t req[2] = {0x21, lid};
+  return isotp_request(tx_id, rx_id, req, 2, buf, len, ISOTP_TIMEOUT_MS);
+}
+
+// SID 0x3E — TesterPresent (broadcast, không cần chờ response)
+void kwp_send_tester_present() {
+  unsigned char data[8] = {0x02, 0x3E, 0x02, 0, 0, 0, 0, 0};
+  canSendRaw(0x7DF, data, 8);
+}// ============================================================
+// File: nextion_pages.ino
+// Mô tả: Logic cập nhật dữ liệu lên Nextion theo từng page
+// ============================================================
+#include "config.h"
+#include "vehicle_data.h"
+#define FALLBACK_SOFT   "1860D00500"
+#define FALLBACK_HARD   "1860D005"
+#define FALLBACK_CAL    "1860D0050001"
+#define FALLBACK_PROTO  "ISO 15765-4 CAN"
+
+extern volatile int  currentPage;
+extern volatile int  scrollOffset;
+extern volatile bool flagReadDTC;
+extern volatile bool flagClearDTC;
+extern volatile bool flagResetConn;
+extern volatile bool flagScrollChanged;
+
+extern void nxSendCmd(const String& cmd);
+extern void nxSetText(const String& pageObj, const String& compName, const String& value);
+extern void nxSetVal(const String& pageObj, const String& compName, int value);
+extern String readDTC(uint8_t mode);
+extern void clearDTC();
+extern void setupCAN();
+extern String readECMDTC();
+extern bool   clearECMDTC();
+// ============================================================
+// DANH SÁCH 30 PID HIỂN THỊ TRÊN LIVE DATA
+// ============================================================
+const char* PID_NAMES[30] = {
+  "RPM",           "Speed",         "Coolant Temp",  "Intake Temp",
+  "Throttle Pos",  "Engine Load",   "Calc Load",     "Timing Adv",
+  "Lambda",        "Short Term FT", "Long Term FT",  "MAP",
+  "Baro Press",    "O2 Sensor 1",   "O2 Sensor 2",   "Control Volt",
+  "Pedal D",       "Pedal E",       "Injector",      "Throttle Act",
+  "Brake Boost",   "Run Time",      "Ambient Temp",  "Fuel Type",
+  "AC Switch",     "AC Relay",      "Clutch SW",     "Ignition SW",
+  "Cranking",      "Fuel Pump"
+};
+
+const char* PID_UNITS[30] = {
+  "rpm",  "km/h",  "C",     "C",
+  "%",    "%",     "%",     "deg",
+  "",     "%",     "%",     "kPa",
+  "kPa",  "V",     "V",     "V",
+  "%",    "%",     "ms",    "%",
+  "V",    "s",     "C",     "",
+  "",     "",      "",      "",
+  "",     ""
+};
+
+// ============================================================
+// LẤY GIÁ TRỊ PID THỨ idx (0-29) DƯỚI DẠNG STRING
+// ============================================================
+String getPIDValueString(int idx) {
+  char buf[12];
+  switch (idx) {
+    case 0:  snprintf(buf, sizeof(buf), "%.0f", xData.rpm);           break;
+    case 1:  snprintf(buf, sizeof(buf), "%.0f", xData.speed);         break;
+    case 2:  snprintf(buf, sizeof(buf), "%.1f", xData.engineTemp);    break;
+    case 3:  snprintf(buf, sizeof(buf), "%.1f", xData.intakeTemp);    break;
+    case 4:  snprintf(buf, sizeof(buf), "%.2f", xData.throttle);      break;
+    case 5:  snprintf(buf, sizeof(buf), "%.2f", xData.engineLoad);    break;
+    case 6:  snprintf(buf, sizeof(buf), "%.2f", xData.calcLoad);      break;
+    case 7:  snprintf(buf, sizeof(buf), "%.1f", xData.timingAdvance); break;
+    case 8:  snprintf(buf, sizeof(buf), "%.3f", xData.lambda);        break;
+    case 9:  snprintf(buf, sizeof(buf), "%.2f", xData.stf);           break;
+    case 10: snprintf(buf, sizeof(buf), "%.2f", xData.ltf);           break;
+    case 11: snprintf(buf, sizeof(buf), "%.0f", xData.map_kpa);       break;
+    case 12: snprintf(buf, sizeof(buf), "%.0f", xData.baro_kpa);      break;
+    case 13: snprintf(buf, sizeof(buf), "%.3f", xData.o2Front);       break;
+    case 14: snprintf(buf, sizeof(buf), "%.3f", xData.o2Rear);        break;
+    case 15: snprintf(buf, sizeof(buf), "%.2f", xData.controlVolt);   break;
+    case 16: snprintf(buf, sizeof(buf), "%.2f", xData.pedalD);        break;
+    case 17: snprintf(buf, sizeof(buf), "%.2f", xData.pedalE);        break;
+    case 18: snprintf(buf, sizeof(buf), "%.2f", xData.injectorMs);    break;
+    case 19: snprintf(buf, sizeof(buf), "%.2f", xData.throttleActPct);break;
+    case 20: snprintf(buf, sizeof(buf), "%.2f", xData.brakeBoostV);   break;
+    case 21: snprintf(buf, sizeof(buf), "%.0f", xData.runTime);       break;
+    case 22: snprintf(buf, sizeof(buf), "%.1f", xData.ambientTemp);   break;
+    case 23: return xData.fuelType;
+    case 24: return xData.acSwitch       ? "ON" : "OFF";
+    case 25: return xData.acRelay        ? "ON" : "OFF";
+    case 26: return xData.clutchSw       ? "ON" : "OFF";
+    case 27: return xData.ignitionSw     ? "ON" : "OFF";
+    case 28: return xData.crankingSignal ? "ON" : "OFF";
+    case 29: return xData.fuelPumpRelay  ? "ON" : "OFF";
+    default: return "---";
+  }
+  return String(buf);
+}
+
+// ============================================================
+// CẬP NHẬT PAGE LIVE DATA (10 hàng theo scrollOffset)
+// ============================================================
+void updateLiveDataPage() {
+  for (int i = 0; i < 10; i++) {
+    int pidIdx = scrollOffset + i;
+    if (pidIdx >= 30) pidIdx = 29;
+
+    nxSendCmd("tname_" + String(i) + ".txt=\"" + String(PID_NAMES[pidIdx]) + "\"");
+    nxSendCmd("t"      + String(i) + ".txt=\"" + getPIDValueString(pidIdx) + "\"");
+    nxSendCmd("t"      + String(i + 10) + ".txt=\"" + String(PID_UNITS[pidIdx]) + "\"");
+  }
+}
+
+// ============================================================
+// CẬP NHẬT PAGE MODULE INFO (i4)
+// VIN đọc thực, các field khác hardcode
+// ============================================================
+void updateModuleInfoPage() {
+  // VIN: dùng thật nếu đọc được (17 ký tự), ngược lại dùng cache
+  String vin = (xData.vin.length() == 17) ? xData.vin : String(CACHED_VIN);
+
+  nxSendCmd("i4.t_vin.txt=\""  + vin              + "\"");
+  nxSendCmd(String("i4.t_soft.txt=\"") + FALLBACK_SOFT  + "\"");
+  nxSendCmd(String("i4.t_hard.txt=\"") + FALLBACK_HARD  + "\"");
+  nxSendCmd(String("i4.t_cal.txt=\"")  + FALLBACK_CAL   + "\"");
+  nxSendCmd(String("i4.t_pro.txt=\"")  + FALLBACK_PROTO + "\"");
+}
+
+// ============================================================
+// XỬ LÝ "read_dtc" từ Nextion
+// ============================================================
+void handleReadDTC() {
+  Serial.println("[NX] Doc DTC...");
+  nxSendCmd("t0.txt=\"Reading DTC...\"");
+
+  String result = readECMDTC();   // 1 lần, SID 0x18 trả tất cả
+  nxSendCmd(String("t0.txt=\"") + result + "\"");
+  Serial.printf("[NX] DTC Result: %s\n", result.c_str());
+}
+
+void handleClearDTC() {
+  Serial.println("[NX] Xoa DTC...");
+  nxSendCmd("t0.txt=\"Clearing...\"");
+  bool ok = clearECMDTC();
+  nxSendCmd(ok ? "t0.txt=\"DTC Cleared!\"" : "t0.txt=\"Clear Failed\"");
+}
+
+// ============================================================
+// XỬ LÝ "reset_conn" từ Nextion
+// ============================================================
+void handleResetConn() {
+  Serial.println("[NX] Reset CAN bus...");
+  setupCAN();
+  Serial.println("[NX] Reset xong");
+}
+
+// ============================================================
+// TASK: Push data lên Nextion + handle flags
+// ============================================================
+void taskNextionTX(void* pvParameters) {
+  vTaskDelay(pdMS_TO_TICKS(2000));
+
+  int lastPushedPage = -1;
+
+  for (;;) {
+    if (flagReadDTC)       { flagReadDTC = false;       handleReadDTC(); }
+    if (flagClearDTC)      { flagClearDTC = false;      handleClearDTC(); }
+    if (flagResetConn)     { flagResetConn = false;     handleResetConn(); }
+    if (flagScrollChanged) { flagScrollChanged = false; updateLiveDataPage(); }
+    if (currentPage == 11) updateLiveDataPage();
+    if (currentPage == 9)  updateSteeringPage();   // ← thêm dòng này
+    // Push NGAY khi page vừa thay đổi (nhờ Initialize Event báo về)
+    if (currentPage != lastPushedPage) {
+      switch (currentPage) {
+        case 5:  updateModuleInfoPage(); break;
+        case 11: updateLiveDataPage();   break;
+        case 9: updateSteeringPage(); break;    // monitor(sas)
+        default: break;
+      }
+      lastPushedPage = currentPage;
+    }
+
+    // Tiếp tục refresh live data liên tục
+    if (currentPage == 11) {
+      updateLiveDataPage();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1500));
+  }
+}
+//
+extern SteeringData steering;
+//
+void updateSteeringPage() {
+  extern SteeringData steering;
+
+  if (!steering.valid) {
+    nxSendCmd("t0.txt=\"---\"");
+    return;
+  }
+
+  // Hiện số góc trên Text t0
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%.1f", steering.angleDeg);
+  nxSendCmd(String("t0.txt=\"") + buf + "\"");
+
+  // Xoay kim la bàn Gauge z0
+  // Nextion gauge: val=90 = 12 giờ = 0° lái
+  // Quay phải (+angle) → kim quay thuận chiều → val giảm
+  int gaugeVal = 90 - (int)steering.angleDeg;
+  gaugeVal = ((gaugeVal % 360) + 360) % 360;  // wrap 0-360
+  nxSendCmd("z0.val=" + String(gaugeVal));
+}// ============================================================
+// File: nextion_ui.ino
+// Mô tả: Low-level UART communication với Nextion
+// ============================================================
+#include "config.h"
+#include "vehicle_data.h"
+
+// === Trạng thái Nextion ===
+volatile int  currentPage      = 0;
+volatile int  scrollOffset     = 0;
+volatile bool nextionConnected = false;
+
+// === Buffer RX ===
+#define NEXTION_RX_BUF_SIZE 64
+char nxRxBuf[NEXTION_RX_BUF_SIZE];
+uint8_t nxRxIdx = 0;
+unsigned long nxLastByteTime = 0;
+
+// === Flag yêu cầu từ Nextion ===
+volatile bool flagReadDTC       = false;
+volatile bool flagClearDTC      = false;
+volatile bool flagResetConn     = false;
+volatile bool flagScrollChanged = false;
+
+// ============================================================
+// GỬI COMMAND ĐẾN NEXTION (tự thêm 3 byte 0xFF kết thúc)
+// ============================================================
+void nxSendCmd(const String& cmd) {
+  NEXTION_SERIAL.print(cmd);
+  NEXTION_SERIAL.write(0xFF);
+  NEXTION_SERIAL.write(0xFF);
+  NEXTION_SERIAL.write(0xFF);
+}
+
+// ============================================================
+// HELPER: Set text cho component (xử lý cả page name có space)
+// ============================================================
+void nxSetText(const String& pageObj, const String& compName, const String& value) {
+  String cmd;
+  if (pageObj.indexOf(' ') >= 0) {
+    cmd = "\"" + pageObj + "\"." + compName + ".txt=\"" + value + "\"";
+  } else {
+    cmd = pageObj + "." + compName + ".txt=\"" + value + "\"";
+  }
+  nxSendCmd(cmd);
+}
+
+void nxSetVal(const String& pageObj, const String& compName, int value) {
+  String cmd;
+  if (pageObj.indexOf(' ') >= 0) {
+    cmd = "\"" + pageObj + "\"." + compName + ".val=" + String(value);
+  } else {
+    cmd = pageObj + "." + compName + ".val=" + String(value);
+  }
+  nxSendCmd(cmd);
+}
+
+// ============================================================
+// KHỞI TẠO NEXTION
+// ============================================================
+void setupNextion() {
+  NEXTION_SERIAL.begin(NEXTION_BAUDRATE, SERIAL_8N1,
+                       NEXTION_RX_PIN, NEXTION_TX_PIN);
+  delay(200);
+  nxSendCmd("page page0");
+  delay(50);
+  Serial.println("[NX] Nextion UART2 khoi tao xong");
+  nextionConnected = true;
+}
+
+// ============================================================
+// PARSE MESSAGE TỪ NEXTION
+// ============================================================
+void nxProcessMessage() {
+  if (nxRxIdx == 0) return;
+
+  // Debug raw bytes
+  Serial.printf("[NX RX raw] %d bytes: ", nxRxIdx);
+  for (int i = 0; i < nxRxIdx; i++) Serial.printf("%02X ", (uint8_t)nxRxBuf[i]);
+  Serial.println();
+
+  // === "scroll:" + 4 byte binary little-endian ===
+  if (nxRxIdx >= 11 && memcmp(nxRxBuf, "scroll:", 7) == 0) {
+    uint8_t b0 = (uint8_t)nxRxBuf[7];
+    uint8_t b1 = (uint8_t)nxRxBuf[8];
+    uint8_t b2 = (uint8_t)nxRxBuf[9];
+    uint8_t b3 = (uint8_t)nxRxBuf[10];
+    uint32_t val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    if (val > 20) val = 20;
+    scrollOffset = val;
+    flagScrollChanged = true;
+    currentPage = 11;
+    Serial.printf("[NX] Scroll offset = %d\n", scrollOffset);
+    nxRxIdx = 0;
+    return;
+  }
+
+  // Null-terminate để dùng String cho các lệnh khác
+  nxRxBuf[nxRxIdx] = '\0';
+  String msg(nxRxBuf);
+  msg.trim();
+  Serial.printf("[NX RX] '%s'\n", msg.c_str());
+
+  // === "p:XX" → page change notification ===
+  if (msg.startsWith("p:")) {
+    int newPage = msg.substring(2).toInt();
+    currentPage = newPage;
+    Serial.printf("[NX] User dang xem page %d\n", currentPage);
+  }
+  // === "read_dtc" ===
+  else if (msg.indexOf("read_dtc") >= 0) {
+    flagReadDTC = true;
+    currentPage = 12;
+    Serial.println("[NX] Yeu cau: Read DTC");
+  }
+  // === "clear_dtc" ===
+  else if (msg.indexOf("clear_dtc") >= 0) {
+    flagClearDTC = true;
+    currentPage = 12;
+    Serial.println("[NX] Yeu cau: Clear DTC");
+  }
+  // === "reset_conn" ===
+  else if (msg.indexOf("reset_conn") >= 0) {
+    flagResetConn = true;
+    currentPage = 11;
+    Serial.println("[NX] Yeu cau: Reset Connection");
+  }
+
+  nxRxIdx = 0;
+}
+
+// ============================================================
+// TASK: Đọc UART từ Nextion liên tục
+// ============================================================
+void taskNextionRX(void* pvParameters) {
+  for (;;) {
+    while (NEXTION_SERIAL.available()) {
+      char c = NEXTION_SERIAL.read();
+      nxLastByteTime = millis();
+
+      if (c == 0x0A) {
+        nxProcessMessage();
+      } else if (nxRxIdx < NEXTION_RX_BUF_SIZE - 1) {
+        nxRxBuf[nxRxIdx++] = c;
+      }
+    }
+
+    if (nxRxIdx > 0 && (millis() - nxLastByteTime > 50)) {
+      nxProcessMessage();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}// ============================================================
+// File: pid_parser.ino
+// Mô tả: Parse response từ ECU -> ghi vào xData
+//        Công thức dựa trên OBD2 chuẩn + Excel giải thuật
+// ============================================================
+#include "config.h"
+#include "vehicle_data.h"
+
+// ============================================================
+// PARSE MODE 01 (Standard OBD2)
+// rxBuf[1]=0x41, rxBuf[2]=PID, rxBuf[3]=A, rxBuf[4]=B
+// ============================================================
+void parseMode01(uint8_t pid, unsigned char* rxBuf, uint8_t len) {
+  LOCK_DATA {
+    switch (pid) {
+
+      case 0x0C: // RPM
+        xData.rpm = ((256.0f * rxBuf[3]) + rxBuf[4]) / 4.0f;
+        break;
+
+      case 0x0D: // Speed
+        xData.speed = rxBuf[3];
+        break;
+
+      case 0x05: // Engine Coolant Temp
+        xData.engineTemp = (float)rxBuf[3] - 40.0f;
+        break;
+
+      case 0x0F: // Intake Air Temp
+        xData.intakeTemp = (float)rxBuf[3] - 40.0f;
+        break;
+
+      case 0x11: // Throttle Position
+        xData.throttle = (rxBuf[3] * 100.0f) / 255.0f;
+        break;
+
+      case 0x43: // Engine Load (absolute)
+        xData.engineLoad = (256.0f * rxBuf[3] + rxBuf[4]) * (100.0f / 255.0f);
+        break;
+
+      case 0x04: // Calculated Load
+        xData.calcLoad = (rxBuf[3] * 100.0f) / 255.0f;
+        break;
+
+      case 0x1F: // Run Time Since Start
+        xData.runTime = (256.0f * rxBuf[3]) + rxBuf[4];
+        break;
+
+      case 0x0E: // Timing Advance
+        xData.timingAdvance = (rxBuf[3] / 2.0f) - 64.0f;
+        break;
+
+      case 0x44: // Lambda (O2 commanded)
+        xData.lambda = (256.0f * rxBuf[3] + rxBuf[4]) / 32768.0f;
+        break;
+
+      case 0x06: // Short Term Fuel Trim
+        xData.stf = (rxBuf[3] / 1.28f) - 100.0f;
+        break;
+
+      case 0x07: // Long Term Fuel Trim
+        xData.ltf = (rxBuf[3] / 1.28f) - 100.0f;
+        break;
+
+      case 0x0B: // MAP
+        xData.map_kpa = rxBuf[3];
+        break;
+
+      case 0x33: // Barometric Pressure
+        xData.baro_kpa = rxBuf[3];
+        break;
+
+      case 0x03: // Fuel System Status
+        xData.fuelSysStatus = rxBuf[3];
+        break;
+
+      case 0x51: // Fuel Type
+        if      (rxBuf[3] == 0x01) xData.fuelType = "Gasoline";
+        else if (rxBuf[3] == 0x04) xData.fuelType = "Diesel";
+        else                        xData.fuelType = "Other";
+        break;
+
+      case 0x14: // O2 Sensor Front
+        xData.o2Front = rxBuf[3] / 200.0f;
+        break;
+
+      case 0x15: // O2 Sensor Rear
+        xData.o2Rear = rxBuf[3] / 200.0f;
+        break;
+
+      case 0x42: // Control Voltage
+        xData.controlVolt = ((256.0f * rxBuf[3]) + rxBuf[4]) / 1000.0f;
+        break;
+
+      case 0x49: // Accelerator Pedal D
+        xData.pedalD = (rxBuf[3] * 100.0f) / 255.0f;
+        break;
+
+      case 0x4A: // Accelerator Pedal E
+        {
+          float raw = (rxBuf[3] * 100.0f) / 255.0f;
+          xData.pedalE = (raw > 0.5f) ? raw : (xData.pedalD * 0.5f);
+        }
+        break;
+
+      case 0x46: // Ambient Air Temp
+        xData.ambientTemp = (float)rxBuf[3] - 40.0f;
+        break;
+
+      default:
+        break;
+    }
+    xData.dataValid  = true;
+    xData.lastUpdate = millis();
+  }
+  UNLOCK_DATA;
+}
+
+// ============================================================
+// PARSE MODE 21 (Mitsubishi Specific - Bit flags)
+// Dựa theo sheet giải thuật Excel:
+//   LID 0x1D = Input Group (công tắc)
+//   LID 0x1E = Relay Group
+// rxBuf[1]=0x61, rxBuf[2]=LID, rxBuf[3]=byte1...
+// ============================================================
+void parseMode21(uint8_t lid, unsigned char* rxBuf, uint8_t len) {
+  LOCK_DATA {
+    switch (lid) {
+
+      case 0x1D: // Input Group
+        // Byte1 (rxBuf[3]):
+        //   bit3 = AC Switch
+        //   bit6 = Cranking Signal
+        // Byte2 (rxBuf[4]):
+        //   bit0 = Ignition Switch
+        // Byte3 (rxBuf[5]):
+        //   bit5 = Clutch Switch
+        xData.acSwitch       = (rxBuf[3] >> 3) & 0x01;
+        xData.crankingSignal = (rxBuf[3] >> 6) & 0x01;
+        xData.ignitionSw     = (rxBuf[4] >> 0) & 0x01;
+        xData.clutchSw       = (rxBuf[5] >> 5) & 0x01;
+        break;
+
+      case 0x1E: // Relay Group
+        // Byte1 (rxBuf[3]):
+        //   bit0 = AC Compressor Relay
+        //   bit1 = Fuel Pump Relay
+        //   bit6 = Starter Relay
+        xData.acRelay       = (rxBuf[3] >> 0) & 0x01;
+        xData.fuelPumpRelay = (rxBuf[3] >> 1) & 0x01;
+        xData.starterRelay  = (rxBuf[3] >> 6) & 0x01;
+        break;
+
+      default:
+        break;
+    }
+    xData.lastUpdate = millis();
+  }
+  UNLOCK_DATA;
+}
+
+// ============================================================
+// IN DỮ LIỆU RA SERIAL (Dùng để debug khi chưa có Nextion)
+// ============================================================
+void printLiveData() {
+  Serial.println("\n========== LIVE DATA ==========");
+  Serial.printf("RPM          : %.0f rpm\n",    xData.rpm);
+  Serial.printf("Speed        : %.0f km/h\n",   xData.speed);
+  Serial.printf("Coolant Temp : %.1f C\n",       xData.engineTemp);
+  Serial.printf("Intake Temp  : %.1f C\n",       xData.intakeTemp);
+  Serial.printf("Throttle     : %.2f %%\n",      xData.throttle);
+  Serial.printf("Engine Load  : %.2f %%\n",      xData.engineLoad);
+  Serial.printf("Timing Adv   : %.1f deg\n",     xData.timingAdvance);
+  Serial.printf("Lambda       : %.3f\n",          xData.lambda);
+  Serial.printf("STF          : %.2f %%\n",      xData.stf);
+  Serial.printf("LTF          : %.2f %%\n",      xData.ltf);
+  Serial.printf("MAP          : %.0f kPa\n",     xData.map_kpa);
+  Serial.printf("Baro         : %.0f kPa\n",     xData.baro_kpa);
+  Serial.printf("O2 Front     : %.3f V\n",       xData.o2Front);
+  Serial.printf("O2 Rear      : %.3f V\n",       xData.o2Rear);
+  Serial.printf("Control Volt : %.2f V\n",       xData.controlVolt);
+  Serial.printf("Pedal D      : %.2f %%\n",      xData.pedalD);
+  Serial.printf("Pedal E      : %.2f %%\n",      xData.pedalE);
+  Serial.printf("Run Time     : %.0f s\n",       xData.runTime);
+  Serial.printf("Fuel Type    : %s\n",           xData.fuelType.c_str());
+  Serial.println("================================");
+}
+
+void printModuleInfo() {
+  Serial.println("\n======= MODULE INFORMATION =====");
+  Serial.printf("VIN          : %s\n",  xData.vin.c_str());
+  Serial.printf("Fuel Type    : %s\n",  xData.fuelType.c_str());
+  Serial.printf("Ambient Temp : %.1f C\n", xData.ambientTemp);
+  Serial.printf("Run Time     : %.0f s\n", xData.runTime);
+  Serial.printf("Control Volt : %.2f V\n", xData.controlVolt);
+  Serial.println("================================");
+}// ============================================
+// File: [tên file].ino
+// Mô tả: [chức năng]
+// ============================================// ============================================================
+// File: steering_module.ino
+// Mô tả: EPS Steering Angle reading + FreeRTOS task
+// ============================================================
+#include "config.h"
+#include "vehicle_data.h"
+
+extern bool kwp_read_data_by_lid(uint16_t tx_id, uint16_t rx_id,
+                                  uint8_t lid, uint8_t* buf, uint16_t* len);
+extern TaskHandle_t hTaskCAN;
+
+// Định nghĩa biến toàn cục
+SteeringData steering;
+
+// ============================================================
+// ĐỌC GÓC ĐÁNH LÁI TỪ EPS (LID 0x33)
+// ============================================================
+bool eps_read_steering_angle() {
+  uint8_t  buf[64];
+  uint16_t len;
+
+  if (!kwp_read_data_by_lid(EPS_REQ_ID, EPS_RESP_ID, 0x33, buf, &len)) {
+    steering.valid = false;
+    return false;
+  }
+
+  if (len < 8) {
+    Serial.printf("[EPS] Response qua ngan: %d bytes\n", len);
+    steering.valid = false;
+    return false;
+  }
+
+  // buf[0]=0x61, buf[1]=0x33, buf[2..3]=reserved
+  // buf[4..5] = angle raw, buf[6..7] = velocity raw
+  uint16_t rawA = ((uint16_t)buf[4] << 8) | buf[5];
+
+  uint8_t statusFlags = (rawA >> 14) & 0x03;   // 2 MSB - quan sát dần
+  steering.angleDeg   = ((rawA & 0x3FFF) * 0.5f) - 2048.0f;
+  steering.lastUpdate = millis();
+  steering.valid      = true;
+
+  Serial.printf("[EPS] Angle = %.1f deg | status_flags = %d\n",
+                steering.angleDeg, statusFlags);
+  return true;
+}
+
+// ============================================================
+// TASK: Poll EPS 10Hz khi user đang xem trang monitor(sas)
+// ============================================================
+void taskSteering(void* pvParameters) {
+  for (;;) {
+    if (currentPage == 9) {
+      vTaskSuspend(hTaskCAN);
+      vTaskDelay(pdMS_TO_TICKS(10));
+      eps_read_steering_angle();
+      vTaskResume(hTaskCAN);
+      vTaskDelay(pdMS_TO_TICKS(100));   // 10 Hz
+    } else {
+      steering.valid = false;
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+  }
+}
+//
+// ============================================================
+// SAS MODULE INFO — CHỈ LID 0x87 (0x9C trả NRC 0x12, bỏ)
+// payload[0]=0x5A, [1]=0x87, [2..11]=header
+// payload[12..19] = ASCII part number "8600A732"
+// payload[20..21] = padding (spaces)
+// ============================================================
+bool sas_read_module_info() {
+  vTaskSuspend(hTaskCAN);
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  uint8_t buf[32];
+  uint16_t len;
+  bool ok = false;
+
+  if (kwp_read_ecu_id(SAS_REQ_ID, SAS_RESP_ID, 0x87, buf, &len)) {
+    if (len >= 20 && buf[0] == 0x5A && buf[1] == 0x87) {
+      // Part number ở buf[12..19] (8 bytes ASCII)
+      char pn[9] = {0};
+      memcpy(pn, &buf[12], 8);
+      pn[8] = '\0';
+      // Trim trailing spaces
+      for (int i = 7; i >= 0 && pn[i] == ' '; i--) pn[i] = '\0';
+
+      strncpy(sasInfo.partNumber87, pn, sizeof(sasInfo.partNumber87) - 1);
+      sasInfo.partNumber87[sizeof(sasInfo.partNumber87) - 1] = '\0';
+      Serial.printf("[SAS] Part Number: %s\n", sasInfo.partNumber87);
+      ok = true;
+    } else {
+      Serial.printf("[SAS] Bad response: buf[0]=%02X buf[1]=%02X len=%d\n",
+                    buf[0], buf[1], len);
+    }
+  } else {
+    Serial.println("[SAS] Module Info: no response");
+  }
+
+  sasInfo.valid = ok;
+  vTaskResume(hTaskCAN);
+  return ok;
+}// ============================================================
+// File: Xpander_VCI.ino
+// Mô tả: Entry point - setup(), loop(), FreeRTOS tasks
+// Platform: ESP32 + MCP2515
+// ============================================================
+#include <mcp_can.h>
+#include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include "config.h"
+#include "vehicle_data.h"
+
+// ============================================================
+// ĐỊNH NGHĨA BIẾN TOÀN CỤC (khai báo extern ở vehicle_data.h)
+// ============================================================
+VehicleData xData;
+SemaphoreHandle_t xDataMutex = NULL;
+
+// Task handles
+TaskHandle_t hTaskCAN  = NULL;
+TaskHandle_t hTaskPrint = NULL;
+
+// ============================================================
+// KHAI BÁO HÀM TỪCÁC FILE KHÁC
+// ============================================================
+extern MCP_CAN CAN;
+extern void setupCAN();
+extern volatile int currentPage;   // ← THÊM vào đây
+extern bool canSendMode01(uint8_t pid);
+extern bool canSendMode21(uint8_t lid);
+extern bool canReceive(long unsigned int* rxId, unsigned char* len,
+                       unsigned char* rxBuf, uint32_t timeoutMs);
+extern void parseMode01(uint8_t pid, unsigned char* rxBuf, uint8_t len);
+extern void parseMode21(uint8_t lid, unsigned char* rxBuf, uint8_t len);
+extern void printLiveData();
+extern void printModuleInfo();
+extern void printDTC();
+extern String readVIN();
+extern void setupNextion();
+extern void taskNextionRX(void* pvParameters);
+extern void taskNextionTX(void* pvParameters);
+extern bool eps_read_steering_angle();
+extern void taskSteering(void* pvParameters);
+
+// ============================================================
+// TASK 1: QUÉT PID LIÊN TỤCg*
+// ============================================================
+void taskReadCAN(void* pvParameters) {
+  // Danh sách Mode 01 PID cần quét
+  const uint8_t mode01_pids[] = {
+    0x0C, // RPM
+    0x0D, // Speed
+    0x05, // ECT
+    0x0F, // IAT
+    0x11, // TPS
+    0x43, // Engine Load
+    0x04, // Calc Load
+    0x0E, // Timing Advance
+    0x44, // Lambda
+    0x06, // STF
+    0x07, // LTF
+    0x0B, // MAP
+    0x33, // Baro
+    0x14, // O2 Front
+    0x15, // O2 Rear
+    0x42, // Control Volt
+    0x49, // Pedal D
+    0x4A, // Pedal E
+    0x1F, // Run Time
+    0x51, // Fuel Type
+    0x46, // Ambient Temp
+    0x03, // Fuel Sys Status
+  };
+
+  // Mode 21 Mitsubishi PIDs
+  
+
+  const uint8_t total01  = sizeof(mode01_pids)  / sizeof(mode01_pids[0]);
+
+  // Ghi giá trị fix cứng vào struct 1 lần
+  LOCK_DATA {
+    xData.injectorMs     = FIX_INJECTOR_MS;
+    xData.throttleActPct = FIX_THROTTLE_PCT;
+    xData.brakeBoostV    = FIX_BRAKE_VOLT;
+  }
+  UNLOCK_DATA;
+
+  uint8_t idx01 = 0;
+
+  for (;;) {
+    long unsigned int rxId;
+    unsigned char len = 0, rxBuf[8];
+
+    // CHỈ quét Mode 01, bỏ Mode 21
+    uint8_t pid = mode01_pids[idx01];
+    if (canSendMode01(pid)) {
+      if (canReceive(&rxId, &len, rxBuf, CAN_TIMEOUT_MS)) {
+        if (rxBuf[1] == 0x41 && rxBuf[2] == pid) {
+          parseMode01(pid, rxBuf, len);
+        } else if (rxBuf[1] == 0x7F) {
+          Serial.printf("[CAN] ECU tu choi PID 0x%02X (NRC: 0x%02X)\n",
+                        pid, rxBuf[3]);
+        }
+      }
+    }
+    idx01 = (idx01 + 1) % total01;
+
+    vTaskDelay(pdMS_TO_TICKS(TASK_CAN_DELAY_MS));
+  }
+}
+// ============================================================
+// TASK 2: IN DỮ LIỆU RA SERIAL (Thay thế Nextion tạm thời)
+// ============================================================
+void taskPrintSerial(void* pvParameters) {
+  // Chờ data hợp lệ trước khi in
+  Serial.println("[PRINT] Cho data tu ECU...");
+  while (!xData.dataValid) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  // Chờ thêm 1s cho ECU ổn định rồi mới đọc DTC
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  printDTC();
+
+  uint8_t printCount = 0;
+  for (;;) {
+    printLiveData();
+    printCount++;
+    if (printCount % 10 == 0) {
+      printModuleInfo();
+    }
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+
+// ============================================================
+// ĐỌC VIN (ISO-TP) - Giữ từ code cũ, đã kiểm chứng
+// ============================================================
+String readVIN() {
+  const String fallbackVIN = CACHED_VIN;
+  Serial.println("[VIN] Dang doc VIN tu ECU...");
+
+  // Xả buffer
+  long unsigned int tid; unsigned char tlen, tbuf[8];
+  while (!digitalRead(CAN_INT_PIN)) CAN.readMsgBuf(&tid, &tlen, tbuf);
+
+  unsigned char txBuf[8] = {0x02, 0x09, 0x02, 0, 0, 0, 0, 0};
+  if (CAN.sendMsgBuf(CAN_ID_ECM_REQ, 0, 8, txBuf) != CAN_OK) {
+    Serial.println("[VIN] Gui lenh that bai -> Dung VIN cache");
+    return fallbackVIN;
+  }
+
+  String vin = "";
+  long start = millis();
+  bool firstFrame = false;
+  int  expectSeq  = 1;
+  uint32_t targetId = CAN_ID_ECM_REQ;
+
+  while (millis() - start < 2000) {
+    if (!digitalRead(CAN_INT_PIN)) {
+      long unsigned int rxId;
+      unsigned char len = 0, rxBuf[8];
+      CAN.readMsgBuf(&rxId, &len, rxBuf);
+
+      if (rxId == CAN_ID_ECM_RESP || rxId == CAN_ID_TCM_RESP) {
+
+        if (!firstFrame && (rxBuf[0] & 0xF0) == 0x10) {
+          targetId = (rxId == CAN_ID_ECM_RESP) ? CAN_ID_ECM_REQ : CAN_ID_TCM_REQ;
+          for (int i = 5; i < 8; i++) vin += (char)rxBuf[i];
+          firstFrame = true;
+          expectSeq  = 1;
+          // Gửi Flow Control
+          unsigned char fc[8] = {0x30, 0x00, 0x0A, 0, 0, 0, 0, 0};
+          CAN.sendMsgBuf(targetId, 0, 8, fc);
+          start = millis(); // Reset timeout
+
+        } else if (firstFrame && (rxBuf[0] & 0xF0) == 0x20) {
+          int seq = rxBuf[0] & 0x0F;
+          if (seq == expectSeq) {
+            for (int i = 1; i < 8; i++) {
+              if (rxBuf[i] >= 32 && rxBuf[i] <= 126) vin += (char)rxBuf[i];
+            }
+            expectSeq++;
+          }
+        }
+
+        if (vin.length() >= 17) {
+          String result = vin.substring(0, 17);
+          LOCK_DATA { xData.vin = result; } UNLOCK_DATA;
+          Serial.printf("[VIN] Doc thanh cong: %s\n", result.c_str());
+          return result;
+        }
+      }
+    }
+  }
+
+  Serial.println("[VIN] Timeout -> Dung VIN cache");
+  LOCK_DATA { xData.vin = fallbackVIN; } UNLOCK_DATA;
+  return fallbackVIN;
+}
+// Thêm task này
+void taskTesterPresent(void* pvParameters) {
+  unsigned char tpFrame[8] = {0x02, 0x3E, 0x02, 0, 0, 0, 0, 0};
+  for (;;) {
+    CAN.sendMsgBuf(0x7DF, 0, 8, tpFrame);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+// ============================================================
+// SETUP
+// ============================================================
+void setup() {
+  Serial.begin(SERIAL_DEBUG_BAUDRATE);
+  delay(1000);
+  Serial.println("\n=== Xpander VCI - Khoi dong ===");
+  xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, NULL);
+  xTaskCreate(taskSteering, "STEER", 4096, NULL, 1, NULL);
+
+  // Tạo Mutex TRƯỚC KHI tạo task
+  xDataMutex = xSemaphoreCreateMutex();
+  if (xDataMutex == NULL) {
+    Serial.println("[ERR] Khong tao duoc Mutex! Dung chuong trinh.");
+    while(1);
+  }
+
+  setupCAN();
+
+  // Đọc VIN ngay khi khởi động
+  readVIN();
+  setupNextion();
+  xTaskCreate(taskNextionRX, "NX_RX", 4096, NULL, 2, NULL);
+  xTaskCreate(taskNextionTX, "NX_TX", 8192, NULL, 1, NULL);
+  // Đọc DTC khi mới bật máy
+  // DTC sẽ được đọc trong taskPrintSerial sau khi có data
+
+  // Tạo FreeRTOS Tasks
+  xTaskCreate(taskReadCAN,    "CAN",   STACK_CAN_TASK,    NULL, PRIORITY_CAN_TASK,    &hTaskCAN);
+  xTaskCreate(taskPrintSerial,"PRINT", STACK_NEXTION_TASK, NULL, PRIORITY_NEXTION_TASK, &hTaskPrint);
+
+  Serial.println("[INIT] San sang! Dang doc du lieu...\n");
+}
+
+// ============================================================
+// LOOP - Trống vì dùng FreeRTOS
+// ============================================================
+void loop() {
+  vTaskDelay(pdMS_TO_TICKS(1000));
+}
+// ============================================================
+// File: config.h
+// Mô tả: Toàn bộ cấu hình phần cứng và hằng số hệ thống
+//        Chỉ cần sửa file này khi thay đổi phần cứng
+// ============================================================
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// ============================================================
+// 1. CAN BUS (MCP2515)
+// ============================================================
+#define CAN_CS_PIN        5       // SPI Chip Select
+#define CAN_INT_PIN       21      // Interrupt pin
+#define CAN_BAUDRATE      CAN_500KBPS
+#define CAN_OSC_FREQ      MCP_8MHZ
+
+// CAN ID - OBD2 Standard
+#define CAN_ID_BROADCAST  0x7DF   // Gửi broadcast tới tất cả ECU
+#define CAN_ID_ECM_REQ    0x7E0   // Request tới ECM
+#define CAN_ID_ECM_RESP   0x7E8   // Response từ ECM
+#define CAN_ID_TCM_REQ    0x7E1   // Request tới TCM (hộp số)
+#define CAN_ID_TCM_RESP   0x7E9   // Response từ TCM
+#define SAS_REQ_ID    0x622    // ← đổi từ 0x784
+#define SAS_RESP_ID   0x484    // ← đổi từ 0x785
+#define EPS_REQ_ID              0x796
+#define EPS_RESP_ID             0x797
+#define ISOTP_TIMEOUT_MS        1000
+#define ISOTP_MAX_PENDING_RETRY 3
+#define ISOTP_FLOW_CONTROL_BS   0x08
+#define ISOTP_FLOW_CONTROL_ST   0x0A
+
+// Timeout chờ response (ms)
+#define CAN_TIMEOUT_MS    100
+
+// ============================================================
+// 2. SPI BUS (Dùng chung MCP2515 + MicroSD)
+// ============================================================
+#define SPI_MOSI_PIN      23
+#define SPI_MISO_PIN      19
+#define SPI_SCK_PIN       18      // Xác nhận lại chân SCK trên board của bạn
+
+// MicroSD - TẠM THỜI CHƯA DÙNG (module đang hỏng)
+// #define SD_CS_PIN      xx      // TODO: Điền vào sau khi thay module mới
+#define SD_ENABLED        false   // Bật lên khi SD hoạt động
+
+// ============================================================
+// 3. NEXTION DISPLAY (UART2)
+// ============================================================
+#define NEXTION_SERIAL    Serial2
+#define NEXTION_TX_PIN    17
+#define NEXTION_RX_PIN    16
+#define NEXTION_BAUDRATE  9600
+
+// ============================================================
+// 4. THÔNG SỐ HỆ THỐNG
+// ============================================================
+#define SERIAL_DEBUG_BAUDRATE   115200  // Serial monitor
+
+// Chu kỳ task FreeRTOS (ms)
+#define TASK_CAN_DELAY_MS       20      // Delay giữa 2 PID request
+#define TASK_NEXTION_DELAY_MS   50      // Refresh màn hình
+#define TASK_SD_DELAY_MS        500     // Ghi log (khi SD hoạt động)
+
+// Stack size FreeRTOS (bytes)
+#define STACK_CAN_TASK          12288
+#define STACK_NEXTION_TASK      4096
+#define STACK_SD_TASK           4096
+
+// Priority FreeRTOS (số càng cao càng ưu tiên)
+#define PRIORITY_CAN_TASK       3
+#define PRIORITY_NEXTION_TASK   2
+#define PRIORITY_SD_TASK        1
+
+// ============================================================
+// 5. GIÁ TRỊ GIẢ LẬP (Fix cứng - giữ lại từ code cũ)
+// Xóa sau khi ECU trả về đúng giá trị thực
+// ============================================================
+#define FIX_INJECTOR_MS         2.05f
+#define FIX_THROTTLE_PCT        3.14f
+#define FIX_BRAKE_VOLT          1.45f
+#define CACHED_VIN              "RLA0LNNC1L1000001"
+
+#endif // CONFIG_H// ============================================================
+// File: vehicle_data.h
+// Mô tả: Struct dữ liệu trung tâm + Mutex bảo vệ
+// ============================================================
+#ifndef VEHICLE_DATA_H
+#define VEHICLE_DATA_H
+
+#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+// ============================================================
+// STRUCT DỮ LIỆU XE
+// ============================================================
+struct VehicleData {
+
+  // --- NHÓM 1: ĐỘNG CƠ CƠ BẢN ---
+  float rpm             = 0;
+  float speed           = 0;
+  float engineTemp      = 0;    // °C
+  float intakeTemp      = 0;    // °C
+  float throttle        = 0;    // %
+  float engineLoad      = 0;    // %
+  float calcLoad        = 0;    // %
+  float runTime         = 0;    // giây
+  float timingAdvance   = 0;    // °CA
+
+  // --- NHÓM 2: NHIÊN LIỆU & KHÍ NẠP ---
+  float lambda          = 0;
+  float stf             = 0;    // Short Term Fuel Trim %
+  float ltf             = 0;    // Long Term Fuel Trim %
+  float map_kpa         = 0;    // Manifold Absolute Pressure kPa
+  float baro_kpa        = 0;    // Barometric Pressure kPa
+  float fuelSysStatus   = 0;
+  String fuelType       = "---";
+
+  // --- NHÓM 3: CƠ CẤU CHẤP HÀNH ---
+  float pedalD          = 0;    // %
+  float pedalE          = 0;    // %
+  float injectorMs      = 0;    // ms  (fix cứng)
+  float throttleActPct  = 0;    // %   (fix cứng)
+  float brakeBoostV     = 0;    // V   (fix cứng)
+
+  // --- NHÓM 4: CẢM BIẾN ĐIỆN ---
+  float o2Front         = 0;    // V
+  float o2Rear          = 0;    // V
+  float controlVolt     = 0;    // V
+
+  // --- NHÓM 5: TRẠNG THÁI MITSUBISHI (bit flags) ---
+  bool  acSwitch        = false;
+  bool  acRelay         = false;
+  bool  clutchSw        = false;
+  bool  ignitionSw      = false;
+  bool  crankingSignal  = false;
+  bool  fuelPumpRelay   = false;
+  bool  starterRelay    = false;
+
+  // --- NHÓM 6: MODULE INFO ---
+  String vin            = "Chua doc...";
+  String ambientTemp_s  = "---";   // dùng string để hiển thị Nextion
+  float  ambientTemp    = 0;
+
+  // --- TRẠNG THÁI HỆ THỐNG ---
+  bool  dataValid       = false;
+  unsigned long lastUpdate = 0;
+};
+//
+struct SteeringData {
+  float angleDeg     = 0;
+  float velocityDps  = 0;
+  unsigned long lastUpdate = 0;
+  bool  valid        = false;
+};
+
+extern SteeringData steering;
+// ============================================================
+// BIẾN TOÀN CỤC - extern (định nghĩa thực ở Xpander_VCI.ino)
+// ============================================================
+extern VehicleData xData;
+extern SemaphoreHandle_t xDataMutex;
+
+// ============================================================
+// MACRO AN TOÀN ĐỌC/GHI STRUCT
+// Dùng: LOCK_DATA { xData.rpm = ...; } UNLOCK_DATA
+// ============================================================
+#define LOCK_DATA   if (xSemaphoreTake(xDataMutex, pdMS_TO_TICKS(10)) == pdTRUE)
+#define UNLOCK_DATA xSemaphoreGive(xDataMutex);
+
+#endif // VEHICLE_DATA_H

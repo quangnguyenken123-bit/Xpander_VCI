@@ -151,7 +151,8 @@ void handleResetConn() {
 // TASK: Push data lên Nextion + handle flags
 // ============================================================
 void taskNextionTX(void* pvParameters) {
-  vTaskDelay(pdMS_TO_TICKS(2000));
+  vTaskDelay(pdMS_TO_TICKS(3000));
+  updateModuleInfoPage();
 
   int lastPushedPage = -1;
 
@@ -159,24 +160,19 @@ void taskNextionTX(void* pvParameters) {
     if (flagReadDTC)       { flagReadDTC = false;       handleReadDTC(); }
     if (flagClearDTC)      { flagClearDTC = false;      handleClearDTC(); }
     if (flagResetConn)     { flagResetConn = false;     handleResetConn(); }
-    if (flagScrollChanged) { flagScrollChanged = false; updateLiveDataPage(); }
-    if (currentPage == 11) updateLiveDataPage();
-    if (currentPage == 9)  updateSteeringPage();   // ← thêm dòng này
+    if (flagScrollChanged) { flagScrollChanged = false; }
     // Push NGAY khi page vừa thay đổi (nhờ Initialize Event báo về)
     if (currentPage != lastPushedPage) {
       switch (currentPage) {
         case 5:  updateModuleInfoPage(); break;
-        case 11: updateLiveDataPage();   break;
-        case 9: updateSteeringPage(); break;    // monitor(sas)
         default: break;
       }
       lastPushedPage = currentPage;
     }
 
     // Tiếp tục refresh live data liên tục
-    if (currentPage == 11) {
-      updateLiveDataPage();
-    }
+    if (currentPage == 11) updateLiveDataPage();
+    if (currentPage == 9)  updateSteeringPage();
 
     vTaskDelay(pdMS_TO_TICKS(1500));
   }

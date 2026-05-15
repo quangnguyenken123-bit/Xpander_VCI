@@ -215,9 +215,6 @@ void setup() {
   Serial.begin(SERIAL_DEBUG_BAUDRATE);
   delay(1000);
   Serial.println("\n=== Xpander VCI - Khoi dong ===");
-  xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, NULL);
-  xTaskCreate(taskSteering, "STEER", 4096, NULL, 1, NULL);
-
   // Tạo Mutex TRƯỚC KHI tạo task
   xDataMutex = xSemaphoreCreateMutex();
   if (xDataMutex == NULL) {
@@ -230,13 +227,15 @@ void setup() {
   // Đọc VIN ngay khi khởi động
   readVIN();
   setupNextion();
-  xTaskCreate(taskNextionRX, "NX_RX", 4096, NULL, 2, NULL);
-  xTaskCreate(taskNextionTX, "NX_TX", 8192, NULL, 1, NULL);
   // Đọc DTC khi mới bật máy
   // DTC sẽ được đọc trong taskPrintSerial sau khi có data
 
   // Tạo FreeRTOS Tasks
   xTaskCreate(taskReadCAN,    "CAN",   STACK_CAN_TASK,    NULL, PRIORITY_CAN_TASK,    &hTaskCAN);
+  xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, NULL);
+  xTaskCreate(taskSteering, "STEER", 4096, NULL, 1, NULL);
+  xTaskCreate(taskNextionRX, "NX_RX", 4096, NULL, 2, NULL);
+  xTaskCreate(taskNextionTX, "NX_TX", 8192, NULL, 1, NULL);
   xTaskCreate(taskPrintSerial,"PRINT", STACK_NEXTION_TASK, NULL, PRIORITY_NEXTION_TASK, &hTaskPrint);
 
   Serial.println("[INIT] San sang! Dang doc du lieu...\n");
