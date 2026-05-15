@@ -22,22 +22,6 @@
 - SAS Read/Clear DTC (có spec, chưa hook vào Nextion)
 - SD Logger (hardware hỏng)
 
-## 🐛 BUG BIẾT TRƯỚC (chưa fix)
-
-### Bug 1 — CRITICAL: Task order trong setup() sai
-`taskTesterPresent` và `taskSteering` được tạo TRƯỚC khi mutex và `hTaskCAN` sẵn sàng.
-**Fix cần**: di chuyển xTaskCreate của 2 task này xuống SAU dòng `xTaskCreate(taskReadCAN, ...)`.
-
-### Bug 2 — steering_module.ino thiếu extern currentPage  
-`taskSteering` dùng `currentPage` nhưng không có `extern volatile int currentPage;`.
-**Fix cần**: thêm `extern volatile int currentPage;` vào đầu steering_module.ino.
-
-### Bug 3 — taskNextionTX thiếu startup push
-Module Info chỉ push khi nhận `p:5` từ Nextion. Nếu PostInitialize Event chưa add → không bao giờ push.
-**Fix cần**: thêm `updateModuleInfoPage();` sau `vTaskDelay(3000)` trước vòng `for(;;)`.
-
-### Bug 4 — updateLiveDataPage() gọi 3 lần/loop
-Trong taskNextionTX, page 11 gọi updateLiveDataPage() dư 2 lần.
 
 ## 📋 NEXTION STATUS
 - PostInitialize Event: **CHƯA add đủ tất cả pages** (cần thêm `print "p:X" + printh 0a`)
