@@ -1,52 +1,73 @@
 # PROJECT STATUS — Xpander_VCI
-# Cập nhật: 15/05/2026
+# Cập nhật: 16/05/2026 — 03:00
 
-## ✅ HOẠT ĐỘNG TỐT (đã test trên xe)
-- Live Data 30 PID realtime (RPM, Speed, Coolant Temp, v.v.)
-- Module Information: VIN + hardcoded Software/Hardware/Cal/Protocol
+## ✅ HOÀN THÀNH (đã compile OK)
+
+### Core
+- Live Data 30 PID realtime (22 Mode01 PIDs)
+- ECM Module Information (VIN + hardcoded fields, fallback CACHED_VIN)
+- SAS Module Information (Part Number từ LID 0x87, fallback "8600A732")
 - Nextion UART communication (9600 baud)
 - ISO-TP transport layer (isotp.ino)
-- KWP2000 SID 0x21 decode logic
-- MCP2515 CAN filter (ECM 0x7E8, TCM 0x7E9, SAS 0x484, EPS 0x797)
-- VIN đọc từ xe qua ISO-TP, fallback CACHED_VIN offline
+- KWP2000 SID 0x21 + 0x1A (kwp2000.ino)
+- VIN đọc từ xe, fallback offline
 
-## ⚠️ CÓ CODE NHƯNG CHƯA TEST ĐỦ
-- ECM Read DTC (SID 0x18) — code đúng, chưa test khi xe có lỗi thật
-- ECM Clear DTC (SID 0x14) — code đúng, chưa test
-- SAS Module Info (LID 0x87) — code đúng, chưa test
-- EPS Steering Angle — code đúng, chưa test trên xe
-- UX startup tự động (phụ thuộc Nextion PostInitialize Event chưa add đủ)
+### Diagnostics
+- ECM Read DTC (SID 0x18 + ISO-TP) — chưa test lỗi thật
+- ECM Clear DTC (SID 0x14) — chưa test
+- SAS Read/Clear DTC — chưa test
+- Smart DTC routing: page 12 → ECM, page 14 → SAS
 
-## ❌ CHƯA IMPLEMENT
-- Actuator Test 4 injectors (có CAN frame, chưa code vào actuator_test.ino)
-- SAS Read/Clear DTC (có spec, chưa hook vào Nextion)
-- SD Logger (hardware hỏng)
+### Actuator Test
+- ECM Injector Cut-off Test (SID 0x30)
+- Poll 150ms, safety RPM > 600, abort RPM < 400
+- 4 injectors (bt0-bt3)
 
-## 🐛 BUG BIẾT TRƯỚC (chưa fix)
+### Steering
+- EPS Steering Angle 10Hz (taskSteering)
+- Gauge z0 + Text t0 trên page monitor(sas)
 
-### Bug 1 — CRITICAL: Task order trong setup() sai
-`taskTesterPresent` và `taskSteering` được tạo TRƯỚC khi mutex và `hTaskCAN` sẵn sàng.
-**Fix cần**: di chuyển xTaskCreate của 2 task này xuống SAU dòng `xTaskCreate(taskReadCAN, ...)`.
+### UX
+- Startup push Module Info ngay khi boot
+- PostInitialize Events đã add đủ tất cả pages
+- Smart back button About page (vaPageBack.val)
+- About page: uptime MM:SS
+- taskNextionTX 800ms refresh
+- GitHub workflow: AGENTS.md + STATUS.md + git local
 
-### Bug 2 — steering_module.ino thiếu extern currentPage  
-`taskSteering` dùng `currentPage` nhưng không có `extern volatile int currentPage;`.
-**Fix cần**: thêm `extern volatile int currentPage;` vào đầu steering_module.ino.
+### GitHub
+- Repo: https://github.com/quangnguyenken123-bit/Xpander_VCI
+- Default branch: master ✅
 
-### Bug 3 — taskNextionTX thiếu startup push
-Module Info chỉ push khi nhận `p:5` từ Nextion. Nếu PostInitialize Event chưa add → không bao giờ push.
-**Fix cần**: thêm `updateModuleInfoPage();` sau `vTaskDelay(3000)` trước vòng `for(;;)`.
+## ⚠️ CHƯA TEST TRÊN XE
 
-### Bug 4 — updateLiveDataPage() gọi 3 lần/loop
-Trong taskNextionTX, page 11 gọi updateLiveDataPage() dư 2 lần.
+- ECM DTC read/clear (cần tạo lỗi: tháo injector connector)
+- SAS Module Info (cần cap Launch sáng mai)
+- SAS DTC read/clear
+- EPS Steering Angle
+- Actuator Test 4 injectors (cần nổ máy)
+- Live data khi xe đang chạy (hôm qua ok nhưng đơ)
 
-## 📋 NEXTION STATUS
-- PostInitialize Event: **CHƯA add đủ tất cả pages** (cần thêm `print "p:X" + printh 0a`)
-- Page 9 (monitor sas): đã có z0 (Gauge), t0 (Text), m0 (Back), m1 (Home)
-- Page 12 (dtc): đã có t0 (Text kết quả), m0 (Read), m1 (Clear)
+## 📋 SÁNG MAI — THỨ TỰ TEST
 
-## 🔧 VIỆC CẦN LÀM TIẾP THEO (theo thứ tự ưu tiên)
-1. Fix 4 bugs trên
-2. Thêm PostInitialize Event cho tất cả Nextion pages → compile → flash SD
-3. Test DTC khi xe có lỗi thật (tháo connector injector)
-4. Implement actuator_test.ino (chờ CAN frame)
-5. Test SAS Module Info + EPS Steering trên xe
+1. Cắm OBD → kiểm tra Module Info hiện VIN ngay
+2. Live Data: kiểm tra 30 PIDs + tốc độ cập nhật
+3. Cap Launch SAS Module Info → check fields thật
+4. Test DTC: tháo connector injector → Read DTC → Clear DTC
+5. Test Steering Angle: tay xoay vô lăng xem kim la bàn
+6. Test Actuator Test khi nổ máy
+
+## 🔧 VIỆC CÒN LẠI (không cần cho test sáng mai)
+
+- SAS Module Info: update fields sau khi có data Launch
+- About page: QR code URL (chờ có poster)
+- Page dtc search (page 13): deferred
+- SD Logger: hardware hỏng, deferred
+- taskPrintSerial cleanup (minor)
+
+## ⚠️ KNOWN ISSUES / LIMITATIONS
+
+- SAS LID 0x9C trả NRC 0x12 → chỉ dùng LID 0x87
+- Mode 21 (0x1D, 0x1E) ECU không trả → ON/OFF hardcode theo RPM
+- SD module hỏng → sd_logger.ino placeholder only
+- Page name có space/ngoặc → dùng bare command (không dùng cross-page)
