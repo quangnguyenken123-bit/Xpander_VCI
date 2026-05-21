@@ -49,6 +49,7 @@ extern void taskActuator(void* pvParameters);
 extern bool sas_read_module_info();
 extern void updateSASInfoPage();
 extern void updateAboutPage();
+extern bool initSD();
 
 // ============================================================
 // TASK 1: QUÉT PID LIÊN TỤCg*
@@ -278,6 +279,9 @@ void setup() {
   readVIN();
   sas_read_module_info();
   setupNextion();
+  if (SD_ENABLED) {
+    initSD();
+  }
   // Đọc DTC khi mới bật máy
   // DTC sẽ được đọc trong taskPrintSerial sau khi có data
 

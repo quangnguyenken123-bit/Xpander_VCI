@@ -11,6 +11,7 @@ extern bool isotp_request(uint16_t tx_id, uint16_t rx_id,
                            uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs);
 extern TaskHandle_t hTaskCAN;
 extern TaskHandle_t hTaskTP;
+extern String lookupDTC(const String& code);
 
 // ============================================================
 // DECODE 2 BYTE → CHUỖI MÃ LỖI (P0010, C0123, ...)
@@ -21,7 +22,10 @@ String decodeDTC(uint8_t hi, uint8_t lo) {
   char letter = "PCBU"[raw >> 14];
   char buf[8];
   sprintf(buf, "%c%d%03X", letter, (raw >> 12) & 3, raw & 0x0FFF);
-  return String(buf);
+  String code = String(buf);
+  String desc = lookupDTC(code);
+  if (desc.length() > 0) return code + ": " + desc;
+  return code;
 }
 
 // ============================================================

@@ -23,6 +23,8 @@ volatile bool flagResetConn     = false;
 volatile bool flagScrollChanged = false;
 extern volatile uint8_t flagInjectorTest;
 extern volatile bool actuatorRunning;
+extern String searchDTCByCategory(char category);
+extern void nxSendCmd(const String& cmd);
 
 // ============================================================
 // GỬI COMMAND ĐẾN NEXTION (tự thêm 3 byte 0xFF kết thúc)
@@ -137,6 +139,14 @@ void nxProcessMessage() {
   else if (msg.startsWith("inj") && msg.indexOf(":off") > 0) {
     // User tat button thu cong (bo qua, ECM tu ket thuc)
     Serial.println("[NX] Injector off (ignore, ECM auto)");
+  }
+  else if (msg.startsWith("dtcsearch:")) {
+    char cat = msg.charAt(10);
+    if (cat == 'P' || cat == 'C' || cat == 'B' || cat == 'U') {
+      Serial.printf("[NX] DTC Search category: %c\n", cat);
+      String result = searchDTCByCategory(cat);
+      nxSendCmd(String("t0.txt=\"") + result + "\"");
+    }
   }
   // === "reset_conn" ===
   else if (msg.indexOf("reset_conn") >= 0) {
