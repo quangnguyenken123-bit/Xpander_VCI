@@ -20,6 +20,7 @@ SemaphoreHandle_t xDataMutex = NULL;
 
 // Task handles
 TaskHandle_t hTaskCAN  = NULL;
+TaskHandle_t hTaskTP   = NULL;
 TaskHandle_t hTaskPrint = NULL;
 
 // ============================================================
@@ -27,6 +28,7 @@ TaskHandle_t hTaskPrint = NULL;
 // ============================================================
 extern MCP_CAN CAN;
 extern void setupCAN();
+extern bool canCheckBusOff();
 extern volatile int currentPage;   // ← THÊM vào đây
 extern bool canSendMode01(uint8_t pid);
 extern bool canSendMode21(uint8_t lid);
@@ -78,8 +80,10 @@ void taskReadCAN(void* pvParameters) {
     0x03, // Fuel Sys Status
   };
 
-  // Mode 21 Mitsubishi PIDs
-  
+  const uint8_t mode21_lids[] = {0x1D, 0x1E};
+  const uint8_t total21 = sizeof(mode21_lids) / sizeof(mode21_lids[0]);
+  static uint8_t idx21 = 0;
+  static uint8_t m01_count = 0;
 
   const uint8_t total01  = sizeof(mode01_pids)  / sizeof(mode01_pids[0]);
 
@@ -97,7 +101,16 @@ void taskReadCAN(void* pvParameters) {
     long unsigned int rxId;
     unsigned char len = 0, rxBuf[8];
 
-    // CHỈ quét Mode 01, bỏ Mode 21
+    static uint32_t lastErrorCheck = 0;
+    if (millis() - lastErrorCheck > 5000) {
+      lastErrorCheck = millis();
+      if (canCheckBusOff()) {
+        Serial.println("[CAN] Bus-Off! Auto-reset...");
+        setupCAN();
+      }
+    }
+
+    // Quet Mode 01 moi vong; Mode 21 chay thua hon ben duoi
     uint8_t pid = mode01_pids[idx01];
     if (canSendMode01(pid)) {
       if (canReceive(&rxId, &len, rxBuf, CAN_TIMEOUT_MS)) {
@@ -112,6 +125,33 @@ void taskReadCAN(void* pvParameters) {
     idx01 = (idx01 + 1) % total01;
 
     vTaskDelay(pdMS_TO_TICKS(TASK_CAN_DELAY_MS));
+
+    // Scan Mode 21 moi 10 lan Mode 01
+    m01_count++;
+    if (m01_count >= 10) {
+      m01_count = 0;
+      uint8_t lid = mode21_lids[idx21];
+      idx21 = (idx21 + 1) % total21;
+
+      if (canSendMode21(lid)) {
+        if (canReceive(&rxId, &len, rxBuf, CAN_TIMEOUT_MS)) {
+          if (rxBuf[1] == 0x61 && rxBuf[2] == lid) {
+            parseMode21(lid, rxBuf, len);
+            Serial.printf("[CAN] Mode21 LID=0x%02X OK\n", lid);
+          }
+          // Neu khong tra: dung fallback ben duoi
+        }
+      }
+
+      // Fallback RPM-based (luon chay, Mode21 ghi de neu co)
+      LOCK_DATA {
+        bool engineOn = (xData.rpm > 400);
+        xData.ignitionSw    = engineOn;
+        xData.fuelPumpRelay = engineOn;
+        xData.crankingSignal = (xData.rpm > 50 && xData.rpm < 400);
+      }
+      UNLOCK_DATA;
+    }
   }
 }
 // ============================================================
@@ -134,6 +174,12 @@ void taskPrintSerial(void* pvParameters) {
     printCount++;
     if (printCount % 10 == 0) {
       printModuleInfo();
+    }
+    static uint32_t lastHeapLog = 0;
+    if (millis() - lastHeapLog > 30000) {
+      Serial.printf("[HEAP] Free=%u Min=%u\n",
+        ESP.getFreeHeap(), ESP.getMinFreeHeap());
+      lastHeapLog = millis();
     }
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
@@ -237,11 +283,11 @@ void setup() {
 
   // Tạo FreeRTOS Tasks
   xTaskCreate(taskReadCAN,    "CAN",   STACK_CAN_TASK,    NULL, PRIORITY_CAN_TASK,    &hTaskCAN);
-  xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, NULL);
-  xTaskCreate(taskSteering, "STEER", 4096, NULL, 1, NULL);
-  xTaskCreate(taskActuator, "ACT", 4096, NULL, 1, NULL);
+  xTaskCreate(taskTesterPresent, "TP", 2048, NULL, 1, &hTaskTP);
+  xTaskCreate(taskSteering, "STEER", 6144, NULL, 1, NULL);
+  xTaskCreate(taskActuator, "ACT", 6144, NULL, 1, NULL);
   xTaskCreate(taskNextionRX, "NX_RX", 4096, NULL, 2, NULL);
-  xTaskCreate(taskNextionTX, "NX_TX", 8192, NULL, 1, NULL);
+  xTaskCreate(taskNextionTX, "NX_TX", 12288, NULL, 1, NULL);
   xTaskCreate(taskPrintSerial,"PRINT", STACK_NEXTION_TASK, NULL, PRIORITY_NEXTION_TASK, &hTaskPrint);
 
   Serial.println("[INIT] San sang! Dang doc du lieu...\n");

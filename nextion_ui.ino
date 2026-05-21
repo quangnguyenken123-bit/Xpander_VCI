@@ -63,6 +63,8 @@ void nxSetVal(const String& pageObj, const String& compName, int value) {
 void setupNextion() {
   NEXTION_SERIAL.begin(NEXTION_BAUDRATE, SERIAL_8N1,
                        NEXTION_RX_PIN, NEXTION_TX_PIN);
+  NEXTION_SERIAL.setTxBufferSize(2048);
+  delay(100);
   delay(200);
   nxSendCmd("page page0");
   delay(50);

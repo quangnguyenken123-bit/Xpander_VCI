@@ -88,7 +88,6 @@ extern SasInfo sasInfo;
 // ============================================================
 extern VehicleData xData;
 extern SemaphoreHandle_t xDataMutex;
-
 // ============================================================
 // MACRO AN TOÀN ĐỌC/GHI STRUCT
 // ============================================================

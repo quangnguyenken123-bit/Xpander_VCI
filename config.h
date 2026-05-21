@@ -39,9 +39,9 @@
 #define SPI_MISO_PIN      19
 #define SPI_SCK_PIN       18      // Xác nhận lại chân SCK trên board của bạn
 
-// MicroSD - TẠM THỜI CHƯA DÙNG (module đang hỏng)
-// #define SD_CS_PIN      xx      // TODO: Điền vào sau khi thay module mới
-#define SD_ENABLED        false   // Bật lên khi SD hoạt động
+// MicroSD - dung chung SPI voi MCP2515, CS rieng
+#define SD_CS_PIN         13      // Dung chung SPI voi MCP2515, CS rieng GPIO13
+#define SD_ENABLED        true    // Dung chung MOSI=23, MISO=19, SCK=18
 
 // ============================================================
 // 3. NEXTION DISPLAY (UART2)
@@ -49,7 +49,7 @@
 #define NEXTION_SERIAL    Serial2
 #define NEXTION_TX_PIN    17
 #define NEXTION_RX_PIN    16
-#define NEXTION_BAUDRATE  9600
+#define NEXTION_BAUDRATE  115200
 
 // ============================================================
 // 4. THÔNG SỐ HỆ THỐNG

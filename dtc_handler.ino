@@ -10,6 +10,7 @@ extern bool isotp_request(uint16_t tx_id, uint16_t rx_id,
                            const uint8_t* req, uint8_t reqLen,
                            uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs);
 extern TaskHandle_t hTaskCAN;
+extern TaskHandle_t hTaskTP;
 
 // ============================================================
 // DECODE 2 BYTE → CHUỖI MÃ LỖI (P0010, C0123, ...)
@@ -39,7 +40,7 @@ String parseDTCPayload(uint8_t* resp, uint16_t len) {
     if (idx + 1 >= len) break;
     String dtc = decodeDTC(resp[idx], resp[idx + 1]);
     if (dtc != "") {
-      if (result != "") result += ", ";
+      if (result != "") result += "\r\n";
       result += dtc;
     }
   }
@@ -52,6 +53,8 @@ String parseDTCPayload(uint8_t* resp, uint16_t len) {
 // ============================================================
 String readECMDTC() {
   vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t req[4]  = {0x18, 0x00, 0xFF, 0x00};
@@ -65,6 +68,7 @@ String readECMDTC() {
   }
 
   Serial.printf("[DTC ECM] %s\n", result.c_str());
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
   vTaskResume(hTaskCAN);
   return result;
 }
@@ -76,6 +80,8 @@ String readECMDTC() {
 // ============================================================
 bool clearECMDTC() {
   vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t req[3]  = {0x14, 0xFF, 0x00};
@@ -89,6 +95,7 @@ bool clearECMDTC() {
   }
 
   Serial.printf("[DTC ECM] Clear %s\n", success ? "OK" : "FAIL");
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
   vTaskResume(hTaskCAN);
   return success;
 }
@@ -98,6 +105,8 @@ bool clearECMDTC() {
 // ============================================================
 String readSASDTC() {
   vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t req[4]  = {0x18, 0x00, 0xFF, 0x00};
@@ -111,6 +120,7 @@ String readSASDTC() {
   }
 
   Serial.printf("[DTC SAS] %s\n", result.c_str());
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
   vTaskResume(hTaskCAN);
   return result;
 }
@@ -120,6 +130,8 @@ String readSASDTC() {
 // ============================================================
 bool clearSASDTC() {
   vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t req[3]  = {0x14, 0xFF, 0x00};
@@ -133,6 +145,7 @@ bool clearSASDTC() {
   }
 
   Serial.printf("[DTC SAS] Clear %s\n", success ? "OK" : "FAIL");
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
   vTaskResume(hTaskCAN);
   return success;
 }

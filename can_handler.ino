@@ -73,6 +73,10 @@ bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len) {
   return CAN.sendMsgBuf(id, 0, len, buf) == CAN_OK;
 }
 
+bool canCheckBusOff() {
+  return (CAN.checkError() != CAN_OK);
+}
+
 // ============================================================
 // NHẬN FRAME CÓ TIMEOUT
 // Trả về true nếu nhận được frame hợp lệ từ ECM/TCM

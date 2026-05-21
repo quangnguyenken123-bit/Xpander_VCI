@@ -10,6 +10,7 @@ extern void updateSteeringPage();
 extern bool kwp_read_data_by_lid(uint16_t tx_id, uint16_t rx_id,
                                   uint8_t lid, uint8_t* buf, uint16_t* len);
 extern TaskHandle_t hTaskCAN;
+extern TaskHandle_t hTaskTP;
 
 // Định nghĩa biến toàn cục
 SteeringData steering;
@@ -18,17 +19,25 @@ extern SasInfo sasInfo; // <--- THÊM DÒNG NÀY VÀO ĐÂY
 // ĐỌC GÓC ĐÁNH LÁI TỪ EPS (LID 0x33)
 // ============================================================
 bool eps_read_steering_angle() {
+  vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
+
   uint8_t  buf[64];
   uint16_t len;
 
   if (!kwp_read_data_by_lid(EPS_REQ_ID, EPS_RESP_ID, 0x33, buf, &len)) {
     steering.valid = false;
+    if (hTaskTP != NULL) vTaskResume(hTaskTP);
+    vTaskResume(hTaskCAN);
     return false;
   }
 
   if (len < 8) {
     Serial.printf("[EPS] Response qua ngan: %d bytes\n", len);
     steering.valid = false;
+    if (hTaskTP != NULL) vTaskResume(hTaskTP);
+    vTaskResume(hTaskCAN);
     return false;
   }
 
@@ -43,6 +52,8 @@ bool eps_read_steering_angle() {
 
   Serial.printf("[EPS] Angle = %.1f deg | status_flags = %d\n",
                 steering.angleDeg, statusFlags);
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
+  vTaskResume(hTaskCAN);
   return true;
 }
 
@@ -52,10 +63,7 @@ bool eps_read_steering_angle() {
 void taskSteering(void* pvParameters) {
   for (;;) {
     if (currentPage == 9) {
-      vTaskSuspend(hTaskCAN);
-      vTaskDelay(pdMS_TO_TICKS(10));
       bool ok = eps_read_steering_angle();
-      vTaskResume(hTaskCAN);
       if (ok) updateSteeringPage();
       vTaskDelay(pdMS_TO_TICKS(100));   // 10 Hz
     } else {
@@ -73,7 +81,11 @@ void taskSteering(void* pvParameters) {
 // ============================================================
 bool sas_read_module_info() {
   bool canTaskActive = (hTaskCAN != NULL);
-  if (canTaskActive) vTaskSuspend(hTaskCAN);
+  if (canTaskActive) {
+    vTaskSuspend(hTaskCAN);
+    if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+    vTaskDelay(pdMS_TO_TICKS(30));
+  }
   vTaskDelay(pdMS_TO_TICKS(50));
 
   uint8_t buf[32];
@@ -102,6 +114,9 @@ bool sas_read_module_info() {
   }
 
   sasInfo.valid = ok;
-  if (canTaskActive) vTaskResume(hTaskCAN);
+  if (canTaskActive) {
+    if (hTaskTP != NULL) vTaskResume(hTaskTP);
+    vTaskResume(hTaskCAN);
+  }
   return ok;
 }

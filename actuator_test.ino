@@ -5,6 +5,7 @@ extern bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len);
 extern bool canReceive(long unsigned int* rxId, unsigned char* len,
                        unsigned char* rxBuf, uint32_t timeoutMs);
 extern TaskHandle_t hTaskCAN;
+extern TaskHandle_t hTaskTP;
 extern void nxSendCmd(const String& cmd);
 
 // Bien trang thai
@@ -46,6 +47,8 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
 
   actuatorRunning = true;
   vTaskSuspend(hTaskCAN);
+  if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
+  vTaskDelay(pdMS_TO_TICKS(30));
   vTaskDelay(pdMS_TO_TICKS(50));
 
   // Disable 3 button con lai
@@ -64,6 +67,7 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
   if (!canSendRaw(CAN_ID_ECM_REQ, req_start, 8)) {
     Serial.println("[ACT] Send START fail");
     actuatorRunning = false;
+    if (hTaskTP != NULL) vTaskResume(hTaskTP);
     vTaskResume(hTaskCAN);
     resetInjectorButton(injNum);
     return false;
@@ -82,6 +86,7 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
       if (rxId == CAN_ID_ECM_RESP && resp[1] == 0x7F) {
         Serial.printf("[ACT] NRC=0x%02X\n", resp[3]);
         actuatorRunning = false;
+        if (hTaskTP != NULL) vTaskResume(hTaskTP);
         vTaskResume(hTaskCAN);
         resetInjectorButton(injNum);
         return false;
@@ -92,6 +97,7 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
   if (!gotAck) {
     Serial.println("[ACT] Khong nhan ACK");
     actuatorRunning = false;
+    if (hTaskTP != NULL) vTaskResume(hTaskTP);
     vTaskResume(hTaskCAN);
     resetInjectorButton(injNum);
     return false;
@@ -151,6 +157,7 @@ bool ecm_injector_cutoff_test(uint8_t injNum) {
   }
 
   actuatorRunning = false;
+  if (hTaskTP != NULL) vTaskResume(hTaskTP);
   vTaskResume(hTaskCAN);
   resetInjectorButton(injNum);
   Serial.printf("[ACT] Test ket thuc: %s\n", completed ? "OK" : "FAIL/ABORT");

@@ -96,13 +96,20 @@ String getPIDValueString(int idx) {
 // CẬP NHẬT PAGE LIVE DATA (10 hàng theo scrollOffset)
 // ============================================================
 void updateLiveDataPage() {
+  char cmd[80];
   for (int i = 0; i < 10; i++) {
     int pidIdx = scrollOffset + i;
     if (pidIdx >= 30) pidIdx = 29;
-
-    nxSendCmd("tname_" + String(i) + ".txt=\"" + String(PID_NAMES[pidIdx]) + "\"");
-    nxSendCmd("t"      + String(i) + ".txt=\"" + getPIDValueString(pidIdx) + "\"");
-    nxSendCmd("t"      + String(i + 10) + ".txt=\"" + String(PID_UNITS[pidIdx]) + "\"");
+    snprintf(cmd, sizeof(cmd), "tname_%d.txt=\"%s\"",
+             i, PID_NAMES[pidIdx]);
+    nxSendCmd(String(cmd));
+    String val = getPIDValueString(pidIdx);
+    snprintf(cmd, sizeof(cmd), "t%d.txt=\"%s\"",
+             i, val.c_str());
+    nxSendCmd(String(cmd));
+    snprintf(cmd, sizeof(cmd), "t%d.txt=\"%s\"",
+             i + 10, PID_UNITS[pidIdx]);
+    nxSendCmd(String(cmd));
   }
 }
 
@@ -126,13 +133,12 @@ void updateSASInfoPage() {
 
   String pn = (sasInfo.valid && strlen(sasInfo.partNumber87) > 0)
               ? String(sasInfo.partNumber87)
-              : "8600A732";
-
-  nxSendCmd("t_vin.txt=\"N/A\"");
-  nxSendCmd(String("t_soft.txt=\"") + pn + "\"");
-  nxSendCmd("t_hard.txt=\"N/A\"");
-  nxSendCmd("t_cal.txt=\"N/A\"");
-  nxSendCmd("t_pro.txt=\"KWP2000 + ISO-TP\"");
+              : "B600A732";
+  nxSendCmd("t_ecu.txt=\"04 / 9C / 00\"");
+  nxSendCmd(String("t_part.txt=\"") + pn + "\"");
+  nxSendCmd("t_hard.txt=\"030100\"");
+  nxSendCmd("t_soft.txt=\"0100\"");
+  nxSendCmd("t_diag.txt=\"80\"");
 }
 
 void updateAboutPage() {
@@ -216,7 +222,7 @@ void taskNextionTX(void* pvParameters) {
 
     if (currentPage == 11) updateLiveDataPage();
     if (currentPage == 10) updateAboutPage();
-    vTaskDelay(pdMS_TO_TICKS(800));
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 //
