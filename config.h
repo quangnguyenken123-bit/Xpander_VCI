@@ -49,7 +49,7 @@
 #define NEXTION_SERIAL    Serial2
 #define NEXTION_TX_PIN    17
 #define NEXTION_RX_PIN    16
-#define NEXTION_BAUDRATE  115200
+#define NEXTION_BAUDRATE  9600
 
 // ============================================================
 // 4. THÔNG SỐ HỆ THỐNG
