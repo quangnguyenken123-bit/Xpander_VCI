@@ -15,6 +15,8 @@ extern volatile bool flagReadDTC;
 extern volatile bool flagClearDTC;
 extern volatile bool flagResetConn;
 extern volatile bool flagScrollChanged;
+extern volatile bool flagSearchDTC;
+extern volatile char searchCategory;
 
 extern void nxSendCmd(const String& cmd);
 extern void nxSetText(const String& pageObj, const String& compName, const String& value);
@@ -209,6 +211,12 @@ void taskNextionTX(void* pvParameters) {
     if (flagClearDTC)      { flagClearDTC = false;      handleClearDTC(); }
     if (flagResetConn)     { flagResetConn = false;     handleResetConn(); }
     if (flagScrollChanged) { flagScrollChanged = false; updateLiveDataPage(); }
+    if (flagSearchDTC) {
+      flagSearchDTC = false;
+      String result = searchDTCByCategory(searchCategory);
+      nxSendCmd(String("t0.txt=\"") + result + "\"");
+      Serial.printf("[NX] DTC Search result sent, cat=%c\n", searchCategory);
+    }
     if (currentPage != lastPushedPage) {
       switch (currentPage) {
         case 5:  updateModuleInfoPage(); break;

@@ -21,6 +21,8 @@ volatile bool flagReadDTC       = false;
 volatile bool flagClearDTC      = false;
 volatile bool flagResetConn     = false;
 volatile bool flagScrollChanged = false;
+volatile bool flagSearchDTC     = false;
+volatile char searchCategory    = 'P';
 extern volatile uint8_t flagInjectorTest;
 extern volatile bool actuatorRunning;
 extern String searchDTCByCategory(char category);
@@ -143,9 +145,9 @@ void nxProcessMessage() {
   else if (msg.startsWith("dtcsearch:")) {
     char cat = msg.charAt(10);
     if (cat == 'P' || cat == 'C' || cat == 'B' || cat == 'U') {
-      Serial.printf("[NX] DTC Search category: %c\n", cat);
-      String result = searchDTCByCategory(cat);
-      nxSendCmd(String("t0.txt=\"") + result + "\"");
+      searchCategory = cat;
+      flagSearchDTC  = true;
+      Serial.printf("[NX] DTC Search queued: %c\n", cat);
     }
   }
   // === "reset_conn" ===

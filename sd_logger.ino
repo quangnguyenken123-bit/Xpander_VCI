@@ -33,6 +33,7 @@ bool loadDTCDatabase() {
   }
 
   dtcDatabaseSize = 0;
+  if (f.available()) f.readStringUntil('\n'); // skip header "DTC Code,Description"
   while (f.available() && dtcDatabaseSize < MAX_DTC_RECORDS) {
     String line = f.readStringUntil('\n');
     line.trim();

@@ -9,8 +9,8 @@
 // ============================================================
 // 1. CAN BUS (MCP2515)
 // ============================================================
-#define CAN_CS_PIN        5       // SPI Chip Select
-#define CAN_INT_PIN       21      // Interrupt pin
+#define CAN_CS_PIN        27      // SPI Chip Select
+#define CAN_INT_PIN       25      // Interrupt pin
 #define CAN_BAUDRATE      CAN_500KBPS
 #define CAN_OSC_FREQ      MCP_8MHZ
 
@@ -40,7 +40,7 @@
 #define SPI_SCK_PIN       18      // Xác nhận lại chân SCK trên board của bạn
 
 // MicroSD - dung chung SPI voi MCP2515, CS rieng
-#define SD_CS_PIN         13      // Dung chung SPI voi MCP2515, CS rieng GPIO13
+#define SD_CS_PIN         26      // Dung chung SPI voi MCP2515, CS rieng GPIO26
 #define SD_ENABLED        true    // Dung chung MOSI=23, MISO=19, SCK=18
 
 // ============================================================
@@ -49,7 +49,7 @@
 #define NEXTION_SERIAL    Serial2
 #define NEXTION_TX_PIN    17
 #define NEXTION_RX_PIN    16
-#define NEXTION_BAUDRATE  9600
+#define NEXTION_BAUDRATE  115200
 
 // ============================================================
 // 4. THÔNG SỐ HỆ THỐNG
