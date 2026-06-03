@@ -232,7 +232,7 @@ void taskNextionTX(void* pvParameters) {
 
     if (currentPage == 11) updateLiveDataPage();
     if (currentPage == 10) updateAboutPage();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(300));
   }
 }
 //

@@ -34,7 +34,11 @@ String decodeDTC(uint8_t hi, uint8_t lo) {
 // ============================================================
 String parseDTCPayload(uint8_t* resp, uint16_t len) {
   if (len < 2)            return "Timeout";
-  if (resp[0] != 0x58)    return "Bad Response";
+  if (resp[0] != 0x58) {
+    Serial.printf("[DTC] Bad: resp[0]=0x%02X resp[1]=0x%02X len=%d\n",
+                  resp[0], resp[1], len);
+    return "Bad Response";
+  }
   uint8_t count = resp[1];
   if (count == 0)          return "No Error";
 
