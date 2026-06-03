@@ -104,10 +104,16 @@ bool canReceive(long unsigned int* rxId, unsigned char* len,
 // ============================================================
 void canFlushBuffer() {
   long unsigned int id;
-  unsigned char len = 0, buf[8];
-  uint8_t count = 0;
-  while (!digitalRead(CAN_INT_PIN) && count < 10) {
+  unsigned char len = 0;
+  unsigned char buf[8];
+  uint16_t count = 0;
+
+  while (CAN_MSGAVAIL == CAN.checkReceive() && count < 50) {
     CAN.readMsgBuf(&id, &len, buf);
     count++;
+  }
+
+  if (count > 0) {
+    Serial.printf("[CAN] Flushed %u old frame(s)\n", count);
   }
 }

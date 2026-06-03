@@ -99,22 +99,50 @@ String getPIDValueString(int idx) {
 // ============================================================
 // CẬP NHẬT PAGE LIVE DATA (10 hàng theo scrollOffset)
 // ============================================================
-void updateLiveDataPage() {
-  char cmd[80];
+static String lastLiveValues[10];
+
+static void clearLiveValueCache() {
   for (int i = 0; i < 10; i++) {
-    int pidIdx = scrollOffset + i;
+    lastLiveValues[i] = "";
+  }
+}
+
+void updateLiveDataLabels() {
+  char cmd[80];
+  int baseOffset = scrollOffset;
+  for (int i = 0; i < 10; i++) {
+    int pidIdx = baseOffset + i;
+    if (pidIdx < 0) pidIdx = 0;
     if (pidIdx >= 30) pidIdx = 29;
     snprintf(cmd, sizeof(cmd), "tname_%d.txt=\"%s\"",
              i, PID_NAMES[pidIdx]);
-    nxSendCmd(String(cmd));
-    String val = getPIDValueString(pidIdx);
-    snprintf(cmd, sizeof(cmd), "t%d.txt=\"%s\"",
-             i, val.c_str());
     nxSendCmd(String(cmd));
     snprintf(cmd, sizeof(cmd), "t%d.txt=\"%s\"",
              i + 10, PID_UNITS[pidIdx]);
     nxSendCmd(String(cmd));
   }
+  clearLiveValueCache();
+}
+
+void updateLiveDataValues(bool force = false) {
+  char cmd[64];
+  int baseOffset = scrollOffset;
+  for (int i = 0; i < 10; i++) {
+    int pidIdx = baseOffset + i;
+    if (pidIdx < 0) pidIdx = 0;
+    if (pidIdx >= 30) pidIdx = 29;
+    String val = getPIDValueString(pidIdx);
+    if (force || val != lastLiveValues[i]) {
+      snprintf(cmd, sizeof(cmd), "t%d.txt=\"%s\"", i, val.c_str());
+      nxSendCmd(String(cmd));
+      lastLiveValues[i] = val;
+    }
+  }
+}
+
+void updateLiveDataPage() {
+  updateLiveDataLabels();
+  updateLiveDataValues(true);
 }
 
 // ============================================================
@@ -208,11 +236,20 @@ void taskNextionTX(void* pvParameters) {
   updateModuleInfoPage();
 
   int lastPushedPage = -1;
+  uint32_t lastLiveValuePush = 0;
+  uint32_t lastAboutPush = 0;
   for (;;) {
+    uint32_t now = millis();
     if (flagReadDTC)       { flagReadDTC = false;       handleReadDTC(); }
     if (flagClearDTC)      { flagClearDTC = false;      handleClearDTC(); }
     if (flagResetConn)     { flagResetConn = false;     handleResetConn(); }
-    if (flagScrollChanged) { flagScrollChanged = false; updateLiveDataPage(); }
+    if (flagScrollChanged) {
+      flagScrollChanged = false;
+      if (currentPage == 11) {
+        updateLiveDataPage();
+        lastLiveValuePush = now;
+      }
+    }
     if (flagSearchDTC) {
       flagSearchDTC = false;
       String result = searchDTCByCategory(searchCategory);
@@ -223,16 +260,22 @@ void taskNextionTX(void* pvParameters) {
       switch (currentPage) {
         case 5:  updateModuleInfoPage(); break;
         case 7:  updateSASInfoPage();    break;
-        case 10: updateAboutPage();      break;
-        case 11: updateLiveDataPage();   break;
+        case 10: updateAboutPage(); lastAboutPush = now; break;
+        case 11: updateLiveDataPage(); lastLiveValuePush = now; break;
         default: break;
       }
       lastPushedPage = currentPage;
     }
 
-    if (currentPage == 11) updateLiveDataPage();
-    if (currentPage == 10) updateAboutPage();
-    vTaskDelay(pdMS_TO_TICKS(300));
+    if (currentPage == 11 && now - lastLiveValuePush >= 180) {
+      updateLiveDataValues(false);
+      lastLiveValuePush = now;
+    }
+    if (currentPage == 10 && now - lastAboutPush >= 1000) {
+      updateAboutPage();
+      lastAboutPush = now;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 //

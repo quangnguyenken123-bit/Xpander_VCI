@@ -51,17 +51,81 @@ extern void updateSASInfoPage();
 extern void updateAboutPage();
 extern bool initSD();
 
+// Live data polling intervals. Keep RPM independent from the slow PID scan.
+static const uint32_t LIVE_PID_TIMEOUT_MS     = 50;
+static const uint32_t LIVE_RPM_INTERVAL_MS    = 100;
+static const uint32_t LIVE_FAST_SLOT_MS       = 100;
+static const uint32_t LIVE_PEDAL_SLOT_MS      = 300;
+static const uint32_t LIVE_SLOW_INTERVAL_MS   = 400;
+static const uint32_t LIVE_MODE21_INTERVAL_MS = 800;
+
+bool pollMode01PID(uint8_t pid, uint32_t timeoutMs) {
+  if (!canSendMode01(pid)) return false;
+
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (CAN_MSGAVAIL == CAN.checkReceive()) {
+      long unsigned int rxId;
+      unsigned char len = 0;
+      unsigned char rxBuf[8];
+      CAN.readMsgBuf(&rxId, &len, rxBuf);
+
+      if (rxId != CAN_ID_ECM_RESP && rxId != CAN_ID_TCM_RESP) continue;
+
+      if (len >= 3 && rxBuf[1] == 0x41 && rxBuf[2] == pid) {
+        parseMode01(pid, rxBuf, len);
+        return true;
+      }
+
+      if (len >= 4 && rxBuf[1] == 0x7F && rxBuf[2] == 0x01) {
+        return false;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+  return false;
+}
+
+static bool pollMode21LID(uint8_t lid, uint32_t timeoutMs) {
+  if (!canSendMode21(lid)) return false;
+
+  unsigned long start = millis();
+  while (millis() - start < timeoutMs) {
+    if (CAN_MSGAVAIL == CAN.checkReceive()) {
+      long unsigned int rxId;
+      unsigned char len = 0;
+      unsigned char rxBuf[8];
+      CAN.readMsgBuf(&rxId, &len, rxBuf);
+
+      if (rxId != CAN_ID_ECM_RESP) continue;
+      if (len >= 3 && rxBuf[1] == 0x61 && rxBuf[2] == lid) {
+        parseMode21(lid, rxBuf, len);
+        Serial.printf("[CAN] Mode21 LID=0x%02X OK\n", lid);
+        return true;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+  return false;
+}
+
 // ============================================================
 // TASK 1: QUÉT PID LIÊN TỤCg*
 // ============================================================
 void taskReadCAN(void* pvParameters) {
-  // Danh sách Mode 01 PID cần quét
-  const uint8_t mode01_pids[] = {
-    0x0C, // RPM
+  const uint8_t fastCorePids[] = {
     0x0D, // Speed
+    0x11, // TPS
+  };
+
+  const uint8_t pedalPids[] = {
+    0x49, // Pedal D
+    0x4A, // Pedal E
+  };
+
+  const uint8_t slowPids[] = {
     0x05, // ECT
     0x0F, // IAT
-    0x11, // TPS
     0x43, // Engine Load
     0x04, // Calc Load
     0x0E, // Timing Advance
@@ -73,8 +137,6 @@ void taskReadCAN(void* pvParameters) {
     0x14, // O2 Front
     0x15, // O2 Rear
     0x42, // Control Volt
-    0x49, // Pedal D
-    0x4A, // Pedal E
     0x1F, // Run Time
     0x51, // Fuel Type
     0x46, // Ambient Temp
@@ -82,13 +144,11 @@ void taskReadCAN(void* pvParameters) {
   };
 
   const uint8_t mode21_lids[] = {0x1D, 0x1E};
-  const uint8_t total21 = sizeof(mode21_lids) / sizeof(mode21_lids[0]);
-  static uint8_t idx21 = 0;
-  static uint8_t m01_count = 0;
+  const uint8_t totalFast  = sizeof(fastCorePids) / sizeof(fastCorePids[0]);
+  const uint8_t totalPedal = sizeof(pedalPids) / sizeof(pedalPids[0]);
+  const uint8_t totalSlow  = sizeof(slowPids) / sizeof(slowPids[0]);
+  const uint8_t total21    = sizeof(mode21_lids) / sizeof(mode21_lids[0]);
 
-  const uint8_t total01  = sizeof(mode01_pids)  / sizeof(mode01_pids[0]);
-
-  // Ghi giá trị fix cứng vào struct 1 lần
   LOCK_DATA {
     xData.injectorMs     = FIX_INJECTOR_MS;
     xData.throttleActPct = FIX_THROTTLE_PCT;
@@ -96,71 +156,78 @@ void taskReadCAN(void* pvParameters) {
   }
   UNLOCK_DATA;
 
-  uint8_t idx01 = 0;
+  uint8_t idxFast = 0;
+  uint8_t idxPedal = 0;
+  uint8_t idxSlow = 0;
+  uint8_t idx21 = 0;
+  uint32_t lastRpmPoll = 0;
+  uint32_t lastFastPoll = 0;
+  uint32_t lastPedalPoll = 0;
+  uint32_t lastSlowPoll = 0;
+  uint32_t lastMode21Poll = 0;
+  uint32_t lastRpmUpdate = 0;
+  uint32_t lastLiveLog = 0;
 
   for (;;) {
-    long unsigned int rxId;
-    unsigned char len = 0, rxBuf[8];
+    uint32_t now = millis();
 
     static uint32_t lastErrorCheck = 0;
-    if (millis() - lastErrorCheck > 5000) {
-      lastErrorCheck = millis();
+    if (now - lastErrorCheck > 5000) {
+      lastErrorCheck = now;
       if (canCheckBusOff()) {
         Serial.println("[CAN] Bus-Off! Auto-reset...");
         setupCAN();
         Serial.println("[CAN] Bus-Off recovered.");
-      } else {
-        byte eflg = CAN.getError();
-        if (eflg & 0xC0) {  // RX0OVR hoặc RX1OVR
-          CAN.mcp2515_modifyRegister(0x2D, 0xC0, 0x00); // Xóa overflow flag
-        }
       }
     }
 
-    // Quet Mode 01 moi vong; Mode 21 chay thua hon ben duoi
-    uint8_t pid = mode01_pids[idx01];
-    if (canSendMode01(pid)) {
-      if (canReceive(&rxId, &len, rxBuf, CAN_TIMEOUT_MS)) {
-        if (rxBuf[1] == 0x41 && rxBuf[2] == pid) {
-          parseMode01(pid, rxBuf, len);
-        } else if (rxBuf[1] == 0x7F) {
-          Serial.printf("[CAN] ECU tu choi PID 0x%02X (NRC: 0x%02X)\n",
-                        pid, rxBuf[3]);
-        }
+    if (currentPage == 11 && now - lastLiveLog >= 1000) {
+      float rpmSnapshot = 0;
+      uint32_t rpmAge = (lastRpmUpdate == 0) ? 0 : (now - lastRpmUpdate);
+      LOCK_DATA {
+        rpmSnapshot = xData.rpm;
       }
+      UNLOCK_DATA;
+      Serial.printf("[LIVE] rpm=%.0f age=%lums\n", rpmSnapshot, (unsigned long)rpmAge);
+      lastLiveLog = now;
     }
-    idx01 = (idx01 + 1) % total01;
 
-    vTaskDelay(pdMS_TO_TICKS(TASK_CAN_DELAY_MS));
-
-    // Scan Mode 21 moi 10 lan Mode 01
-    m01_count++;
-    if (m01_count >= 10) {
-      m01_count = 0;
+    if (now - lastRpmPoll >= LIVE_RPM_INTERVAL_MS) {
+      lastRpmPoll = now;
+      if (pollMode01PID(0x0C, LIVE_PID_TIMEOUT_MS)) {
+        lastRpmUpdate = millis();
+      }
+    } else if (now - lastFastPoll >= LIVE_FAST_SLOT_MS) {
+      lastFastPoll = now;
+      pollMode01PID(fastCorePids[idxFast], LIVE_PID_TIMEOUT_MS);
+      idxFast = (idxFast + 1) % totalFast;
+    } else if (now - lastPedalPoll >= LIVE_PEDAL_SLOT_MS) {
+      lastPedalPoll = now;
+      pollMode01PID(pedalPids[idxPedal], LIVE_PID_TIMEOUT_MS);
+      idxPedal = (idxPedal + 1) % totalPedal;
+    } else if (now - lastSlowPoll >= LIVE_SLOW_INTERVAL_MS) {
+      lastSlowPoll = now;
+      pollMode01PID(slowPids[idxSlow], LIVE_PID_TIMEOUT_MS);
+      idxSlow = (idxSlow + 1) % totalSlow;
+    } else if (now - lastMode21Poll >= LIVE_MODE21_INTERVAL_MS) {
+      lastMode21Poll = now;
       uint8_t lid = mode21_lids[idx21];
       idx21 = (idx21 + 1) % total21;
+      pollMode21LID(lid, LIVE_PID_TIMEOUT_MS);
 
-      if (canSendMode21(lid)) {
-        if (canReceive(&rxId, &len, rxBuf, CAN_TIMEOUT_MS)) {
-          if (rxBuf[1] == 0x61 && rxBuf[2] == lid) {
-            parseMode21(lid, rxBuf, len);
-            Serial.printf("[CAN] Mode21 LID=0x%02X OK\n", lid);
-          }
-          // Neu khong tra: dung fallback ben duoi
-        }
-      }
-
-      // Fallback RPM-based (luon chay, Mode21 ghi de neu co)
       LOCK_DATA {
         bool engineOn = (xData.rpm > 400);
-        xData.ignitionSw    = engineOn;
+        xData.ignitionSw = engineOn;
         xData.fuelPumpRelay = engineOn;
         xData.crankingSignal = (xData.rpm > 50 && xData.rpm < 400);
       }
       UNLOCK_DATA;
     }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
+
 // ============================================================
 // TASK 2: IN DỮ LIỆU RA SERIAL (Thay thế Nextion tạm thời)
 // ============================================================

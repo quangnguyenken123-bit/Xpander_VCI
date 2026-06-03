@@ -9,6 +9,12 @@
 extern bool isotp_request(uint16_t tx_id, uint16_t rx_id,
                            const uint8_t* req, uint8_t reqLen,
                            uint8_t* resp, uint16_t* respLen, uint32_t timeoutMs);
+extern bool isotp_request_wait_sid(uint16_t tx_id, uint16_t rx_id,
+                                   const uint8_t* req, uint8_t reqLen,
+                                   uint8_t expectedSid, uint8_t originalSid,
+                                   uint8_t* resp, uint16_t* respLen,
+                                   uint32_t timeoutMs);
+extern void canFlushBuffer();
 extern TaskHandle_t hTaskCAN;
 extern TaskHandle_t hTaskTP;
 extern String lookupDTC(const String& code);
@@ -55,24 +61,55 @@ String parseDTCPayload(uint8_t* resp, uint16_t len) {
   return (result == "") ? "No Error" : result;
 }
 
+String parseECMMode03DTCPayload(uint8_t* resp, uint16_t len) {
+  if (len < 1) return "Timeout";
+
+  if (resp[0] != 0x43) {
+    Serial.printf("[DTC ECM] Bad SID: resp[0]=0x%02X len=%d\n", resp[0], len);
+    return "Bad Response";
+  }
+
+  String result = "";
+
+  for (uint16_t i = 1; i + 1 < len; i += 2) {
+    if (resp[i] == 0x00 && resp[i + 1] == 0x00) continue;
+
+    String dtc = decodeDTC(resp[i], resp[i + 1]);
+    if (dtc.length() > 0) {
+      if (result.length() > 0) result += "\r\n";
+      result += dtc;
+      Serial.printf("[DTC ECM] Parsed: %s\n", dtc.c_str());
+    }
+  }
+
+  if (result.length() == 0) {
+    Serial.println("[DTC ECM] No Error");
+    return "No Error";
+  }
+  return result;
+}
+
 // ============================================================
-// ECM READ DTC — SID 0x18 (KWP)
-// Request:  04 18 00 FF 00 00 00 00
+// ECM READ DTC — OBD-II Mode 03
+// Request:  01 03 00 00 00 00 00 00
 // ============================================================
 String readECMDTC() {
+  Serial.println("[DTC ECM] Start Mode 03 Read DTC");
+
   vTaskSuspend(hTaskCAN);
   if (hTaskTP != NULL) vTaskSuspend(hTaskTP);
-  vTaskDelay(pdMS_TO_TICKS(30));
-  vTaskDelay(pdMS_TO_TICKS(50));
+  vTaskDelay(pdMS_TO_TICKS(100));
+  canFlushBuffer();
 
-  uint8_t req[4]  = {0x18, 0x00, 0xFF, 0x00};
+  uint8_t req[1] = {0x03};
   uint8_t resp[64];
-  uint16_t respLen;
+  uint16_t respLen = 0;
   String result = "Timeout";
 
-  if (isotp_request(CAN_ID_ECM_REQ, CAN_ID_ECM_RESP,
-                    req, 4, resp, &respLen, ISOTP_TIMEOUT_MS)) {
-    result = parseDTCPayload(resp, respLen);
+  if (isotp_request_wait_sid(CAN_ID_ECM_REQ, CAN_ID_ECM_RESP,
+                             req, 1, 0x43, 0x03,
+                             resp, &respLen, ISOTP_TIMEOUT_MS)) {
+    result = parseECMMode03DTCPayload(resp, respLen);
   }
 
   Serial.printf("[DTC ECM] %s\n", result.c_str());
