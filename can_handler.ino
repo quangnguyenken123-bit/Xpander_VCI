@@ -74,7 +74,9 @@ bool canSendRaw(uint32_t id, unsigned char* buf, uint8_t len) {
 }
 
 bool canCheckBusOff() {
-  return (CAN.checkError() != CAN_OK);
+  byte eflg = CAN.getError();   // Đọc EFLG register MCP2515
+  return (eflg & 0x20);         // Bit 5 = TXBO (Bus-Off thật sự)
+  // Không reset khi chỉ có warning nhẹ hoặc RX overflow
 }
 
 // ============================================================

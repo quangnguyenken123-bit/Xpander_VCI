@@ -28,6 +28,8 @@ extern String readECMDTC();
 extern bool   clearECMDTC();
 extern String readSASDTC();
 extern bool   clearSASDTC();
+extern String searchDTCByCategory(char category);
+
 // ============================================================
 // DANH SÁCH 30 PID HIỂN THỊ TRÊN LIVE DATA
 // ============================================================

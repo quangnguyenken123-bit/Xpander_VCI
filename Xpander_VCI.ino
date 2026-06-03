@@ -108,6 +108,12 @@ void taskReadCAN(void* pvParameters) {
       if (canCheckBusOff()) {
         Serial.println("[CAN] Bus-Off! Auto-reset...");
         setupCAN();
+        Serial.println("[CAN] Bus-Off recovered.");
+      } else {
+        byte eflg = CAN.getError();
+        if (eflg & 0xC0) {  // RX0OVR hoặc RX1OVR
+          CAN.mcp2515_modifyRegister(0x2D, 0xC0, 0x00); // Xóa overflow flag
+        }
       }
     }
 
