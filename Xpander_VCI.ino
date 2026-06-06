@@ -17,6 +17,9 @@
 VehicleData xData;
 SasInfo sasInfo; // <--- THÊM DÒNG NÀY VÀO ĐÂY
 SemaphoreHandle_t xDataMutex = NULL;
+volatile uint32_t lastLiveDataUpdateMs = 0;
+volatile uint32_t lastRpmUpdateMs = 0;
+volatile bool flagForceLiveRefresh = false;
 
 // Task handles
 TaskHandle_t hTaskCAN  = NULL;
@@ -29,6 +32,7 @@ TaskHandle_t hTaskPrint = NULL;
 extern MCP_CAN CAN;
 extern void setupCAN();
 extern bool canCheckBusOff();
+extern void canFlushBuffer();
 extern volatile int currentPage;   // ← THÊM vào đây
 extern bool canSendMode01(uint8_t pid);
 extern bool canSendMode21(uint8_t lid);
@@ -165,8 +169,8 @@ void taskReadCAN(void* pvParameters) {
   uint32_t lastPedalPoll = 0;
   uint32_t lastSlowPoll = 0;
   uint32_t lastMode21Poll = 0;
-  uint32_t lastRpmUpdate = 0;
   uint32_t lastLiveLog = 0;
+  uint32_t lastStaleWatchdog = 0;
 
   for (;;) {
     uint32_t now = millis();
@@ -183,20 +187,40 @@ void taskReadCAN(void* pvParameters) {
 
     if (currentPage == 11 && now - lastLiveLog >= 1000) {
       float rpmSnapshot = 0;
-      uint32_t rpmAge = (lastRpmUpdate == 0) ? 0 : (now - lastRpmUpdate);
+      uint32_t rpmAge = (lastRpmUpdateMs == 0) ? now : (now - lastRpmUpdateMs);
+      uint32_t liveAge = (lastLiveDataUpdateMs == 0) ? now : (now - lastLiveDataUpdateMs);
       LOCK_DATA {
         rpmSnapshot = xData.rpm;
       }
       UNLOCK_DATA;
-      Serial.printf("[LIVE] rpm=%.0f age=%lums\n", rpmSnapshot, (unsigned long)rpmAge);
+      Serial.printf("[LIVE] rpm=%.0f rpmAge=%lums liveAge=%lums\n",
+                    rpmSnapshot, (unsigned long)rpmAge, (unsigned long)liveAge);
       lastLiveLog = now;
+    }
+
+    if (currentPage == 11) {
+      uint32_t rpmAge = (lastRpmUpdateMs == 0) ? now : (now - lastRpmUpdateMs);
+      uint32_t liveAge = (lastLiveDataUpdateMs == 0) ? now : (now - lastLiveDataUpdateMs);
+      if ((rpmAge > 2000 || liveAge > 3000) && now - lastStaleWatchdog >= 1000) {
+        Serial.printf("[LIVE] Warning: RPM stale for %lums, liveAge=%lums, flushing CAN RX buffer\n",
+                      (unsigned long)rpmAge, (unsigned long)liveAge);
+        canFlushBuffer();
+        idxFast = 0;
+        idxPedal = 0;
+        idxSlow = 0;
+        lastRpmPoll = now - LIVE_RPM_INTERVAL_MS;
+        lastFastPoll = now - LIVE_FAST_SLOT_MS;
+        lastPedalPoll = now - LIVE_PEDAL_SLOT_MS;
+        lastSlowPoll = now - LIVE_SLOW_INTERVAL_MS;
+        lastMode21Poll = now - LIVE_MODE21_INTERVAL_MS;
+        flagForceLiveRefresh = true;
+        lastStaleWatchdog = now;
+      }
     }
 
     if (now - lastRpmPoll >= LIVE_RPM_INTERVAL_MS) {
       lastRpmPoll = now;
-      if (pollMode01PID(0x0C, LIVE_PID_TIMEOUT_MS)) {
-        lastRpmUpdate = millis();
-      }
+      pollMode01PID(0x0C, LIVE_PID_TIMEOUT_MS);
     } else if (now - lastFastPoll >= LIVE_FAST_SLOT_MS) {
       lastFastPoll = now;
       pollMode01PID(fastCorePids[idxFast], LIVE_PID_TIMEOUT_MS);

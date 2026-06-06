@@ -6,11 +6,16 @@
 #include "config.h"
 #include "vehicle_data.h"
 
+extern volatile uint32_t lastLiveDataUpdateMs;
+extern volatile uint32_t lastRpmUpdateMs;
+
 // ============================================================
 // PARSE MODE 01 (Standard OBD2)
 // rxBuf[1]=0x41, rxBuf[2]=PID, rxBuf[3]=A, rxBuf[4]=B
 // ============================================================
 void parseMode01(uint8_t pid, unsigned char* rxBuf, uint8_t len) {
+  uint32_t now = millis();
+
   LOCK_DATA {
     switch (pid) {
 
@@ -111,9 +116,14 @@ void parseMode01(uint8_t pid, unsigned char* rxBuf, uint8_t len) {
         break;
     }
     xData.dataValid  = true;
-    xData.lastUpdate = millis();
+    xData.lastUpdate = now;
   }
   UNLOCK_DATA;
+
+  lastLiveDataUpdateMs = now;
+  if (pid == 0x0C) {
+    lastRpmUpdateMs = now;
+  }
 }
 
 // ============================================================

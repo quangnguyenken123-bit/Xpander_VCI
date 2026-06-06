@@ -16,6 +16,7 @@ extern volatile bool flagClearDTC;
 extern volatile bool flagResetConn;
 extern volatile bool flagScrollChanged;
 extern volatile bool flagSearchDTC;
+extern volatile bool flagForceLiveRefresh;
 extern volatile char searchCategory;
 
 extern void nxSendCmd(const String& cmd);
@@ -124,7 +125,7 @@ void updateLiveDataLabels() {
   clearLiveValueCache();
 }
 
-void updateLiveDataValues(bool force = false) {
+void updateLiveDataValues(bool force) {
   char cmd[64];
   int baseOffset = scrollOffset;
   for (int i = 0; i < 10; i++) {
@@ -252,9 +253,15 @@ void taskNextionTX(void* pvParameters) {
     }
     if (flagSearchDTC) {
       flagSearchDTC = false;
-      String result = searchDTCByCategory(searchCategory);
-      nxSendCmd(String("t0.txt=\"") + result + "\"");
+      searchDTCByCategory(searchCategory);
       Serial.printf("[NX] DTC Search result sent, cat=%c\n", searchCategory);
+    }
+    if (flagForceLiveRefresh) {
+      flagForceLiveRefresh = false;
+      if (currentPage == 11) {
+        updateLiveDataValues(true);
+        lastLiveValuePush = now;
+      }
     }
     if (currentPage != lastPushedPage) {
       switch (currentPage) {

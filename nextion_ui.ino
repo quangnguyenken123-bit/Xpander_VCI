@@ -4,6 +4,8 @@
 // ============================================================
 #include "config.h"
 #include "vehicle_data.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // === Trạng thái Nextion ===
 volatile int  currentPage      = 0;
@@ -26,6 +28,8 @@ volatile char searchCategory    = 'P';
 extern volatile uint8_t flagInjectorTest;
 extern volatile bool actuatorRunning;
 extern String searchDTCByCategory(char category);
+extern void dtcNextPage();
+extern void dtcPrevPage();
 extern void nxSendCmd(const String& cmd);
 
 // ============================================================
@@ -36,6 +40,11 @@ void nxSendCmd(const String& cmd) {
   NEXTION_SERIAL.write(0xFF);
   NEXTION_SERIAL.write(0xFF);
   NEXTION_SERIAL.write(0xFF);
+  if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
+    vTaskDelay(pdMS_TO_TICKS(1));
+  } else {
+    delay(1);
+  }
 }
 
 // ============================================================
@@ -149,6 +158,14 @@ void nxProcessMessage() {
       flagSearchDTC  = true;
       Serial.printf("[NX] DTC Search queued: %c\n", cat);
     }
+  }
+  else if (msg == "dtc_next") {
+    Serial.println("[NX] DTC Search next page");
+    dtcNextPage();
+  }
+  else if (msg == "dtc_prev") {
+    Serial.println("[NX] DTC Search prev page");
+    dtcPrevPage();
   }
   // === "reset_conn" ===
   else if (msg.indexOf("reset_conn") >= 0) {
