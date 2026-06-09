@@ -12,6 +12,10 @@ volatile int  currentPage      = 0;
 volatile int  scrollOffset     = 0;
 volatile bool nextionConnected = false;
 
+const int LIVE_ROWS_PER_PAGE = 10;
+const int LIVE_TOTAL_PIDS = 30;
+const int LIVE_MAX_OFFSET = LIVE_TOTAL_PIDS - LIVE_ROWS_PER_PAGE;
+
 // === Buffer RX ===
 #define NEXTION_RX_BUF_SIZE 64
 char nxRxBuf[NEXTION_RX_BUF_SIZE];
@@ -72,6 +76,34 @@ void nxSetVal(const String& pageObj, const String& compName, int value) {
 
 // ============================================================
 // KHỞI TẠO NEXTION
+// ============================================================
+// Live Data uses 3 pages of 10 rows: offsets 0, 10, 20.
+void liveNextPage() {
+  int newOffset = scrollOffset + LIVE_ROWS_PER_PAGE;
+  if (newOffset > LIVE_MAX_OFFSET) newOffset = LIVE_MAX_OFFSET;
+
+  if (newOffset != scrollOffset) {
+    scrollOffset = newOffset;
+    flagScrollChanged = true;
+    currentPage = 11;
+    Serial.printf("[NX] Live Data next page, offset=%d\n", scrollOffset);
+  }
+}
+
+void livePrevPage() {
+  int newOffset = scrollOffset - LIVE_ROWS_PER_PAGE;
+  if (newOffset < 0) newOffset = 0;
+
+  if (newOffset != scrollOffset) {
+    scrollOffset = newOffset;
+    flagScrollChanged = true;
+    currentPage = 11;
+    Serial.printf("[NX] Live Data prev page, offset=%d\n", scrollOffset);
+  }
+}
+
+// ============================================================
+// SETUP NEXTION
 // ============================================================
 void setupNextion() {
   NEXTION_SERIAL.begin(NEXTION_BAUDRATE, SERIAL_8N1,
@@ -166,6 +198,12 @@ void nxProcessMessage() {
   else if (msg == "dtc_prev") {
     Serial.println("[NX] DTC Search prev page");
     dtcPrevPage();
+  }
+  else if (msg == "live_next") {
+    liveNextPage();
+  }
+  else if (msg == "live_prev") {
+    livePrevPage();
   }
   // === "reset_conn" ===
   else if (msg.indexOf("reset_conn") >= 0) {
